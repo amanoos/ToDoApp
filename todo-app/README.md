@@ -22,6 +22,9 @@ security, deployment) without WebAssembly and without a line of hand-written Jav
   updates only the list. Everything you choose is kept in the URL, so views can be shared.
 - **Private by construction:** every query is scoped to the signed-in user, with tests that
   prove one user cannot read or change another's todos or lists.
+- **A designed interface:** a colorful, animated, full-window layout with a progress dashboard,
+  illustrations and frosted-glass cards, all in CSS and inline SVG (no images to download, no
+  JavaScript beyond Topcoat's own runtime).
 - **Security headers** (CSP, anti-framing, no-store caching and more) and a **self-hosted**
   font, so the page makes no third-party requests.
 - **Deployable:** a Docker image, a compose file with an HTTPS reverse proxy, health checks and
@@ -145,11 +148,12 @@ executable and applied at startup.
 
 | Path | Contents |
 | --- | --- |
-| `src/app.rs`, `src/app/` | The route tree: router, layout, and one module per page (`todos`, `lists`, `login`, ...). |
+| `src/app.rs`, `src/app/` | The route tree: router, layout, and one module per page (`todos`, `lists`, `login`, ...). `shell.rs` holds the page frames (top bar, split-screen sign-in). |
 | `src/features/` | Everything a feature owns: `todo` (model, validation, sorting, search), `list`, `user` (accounts, sessions), `reset` (one-time links), `forgot` (emailing them), `throttle` (rate limiter). Pure logic is unit-tested here. |
-| `src/components/` | Shared UI components (button, input, card). |
+| `src/components/` | Shared UI components (button, input, card, `glyph` for icons). |
 | `src/security.rs` | The security-headers layer and the Content-Security-Policy. |
 | `src/config.rs`, `src/db.rs`, `src/healthcheck.rs` | Settings, the database and embedded migrations, the container health check. |
+| `styles.css` | The theme: color tokens, backdrop, SVG artwork and animation. Restyle the app here. |
 | `toasty/` | Database migrations. Commit them with the code. |
 | `Dockerfile`, `docker-compose.yml`, `deploy/` | Container image, compose stack, Caddy config. |
 | `docs/` | Deployment guide and developer-experience notes. |

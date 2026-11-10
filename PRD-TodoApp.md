@@ -213,7 +213,7 @@ Rust is well-regarded for performance and safety, but full-stack web development
   - **Not done:** the Today/Overdue views and sorting by due date or priority; the edit form doesn't keep unsaved input after a validation error (it reloads the saved values).
 
 ### Feature 6: Modern, Accessible UI
-- **Description:** Tailwind-based components from `topcoat-ui`, responsive layout, dark mode, keyboard shortcuts, content-hashed assets via `asset!`, self-hosted font.
+- **Description:** Tailwind-based components from `topcoat-ui`, responsive layout, dark mode, keyboard shortcuts, content-hashed assets via `asset!`, self-hosted font. **Visual design (built):** a teal-to-blue brand gradient with a Rust-orange accent; a drifting aurora and dot-grid backdrop fixed to the window; frosted-glass cards; inline-SVG illustrations (sign-in panel, empty states, dashboard banner); a three-column dashboard on wide screens (lists and sorting, the todo cards, a progress ring with counters and an "Up next" list) that collapses to one column on phones; and CSS-only motion (staggered entrances, a pop on completion, hover lift, an animated progress ring) that stops under `prefers-reduced-motion`. All of it respects the CSP: no inline styles, no third-party images or fonts.
 - **User Benefit:** A polished demo; usable by everyone.
 - **Acceptance Criteria:**
   - [ ] Works at 360 px width and up

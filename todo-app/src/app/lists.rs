@@ -10,11 +10,14 @@ use topcoat::{
     view::{View, attributes, view},
 };
 
+use crate::app::shell::{Nav, app_shell};
 use crate::components::button::{ButtonSize, ButtonVariant, button};
+use crate::components::icon::glyph;
 use crate::components::input::input;
 use crate::features::list::{List, ListError, MAX_NAME_LEN};
 use crate::features::todo::Todo;
 use crate::features::user::require_user;
+use topcoat::icon::iconify::iconify_icon;
 
 #[query_params(error = redirect("?"))]
 struct ListsQuery {
@@ -54,11 +57,20 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
     let max_len = MAX_NAME_LEN.to_string();
 
     Ok(view! {
-        <main class="mx-auto max-w-xl px-4 py-16">
-            <div class="flex items-center justify-between gap-4">
-                <h1 class="text-3xl font-semibold tracking-tight">"Lists"</h1>
-                <a class="text-sm underline" href=(href!(crate::app::todos::page))>"Back to todos"</a>
+        app_shell(
+            email: user.email.clone(),
+            active: Nav::Lists,
+            <div class="rise mb-6 flex items-center gap-4">
+                <span class="brand-gradient grid size-12 shrink-0 place-items-center rounded-2xl text-primary-foreground shadow-sm">
+                    glyph(data: iconify_icon!("lucide:folders"), attrs: attributes! { class="size-6" })
+                </span>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight">"Lists"</h1>
+                    <p class="text-sm text-muted-foreground">"Group todos by project, place or person."</p>
+                </div>
             </div>
+            <div class="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+            <div>
             if let Some(error) = error {
                 <p role="alert" class="mt-4 text-sm text-destructive">(error.message())</p>
             }
@@ -84,7 +96,7 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
             } else {
                 <ul class="mt-6 space-y-2">
                     for row in rows {
-                        <li class="rounded-lg border border-border p-3">
+                        <li class="glass lift rounded-2xl p-3">
                             <div class="flex flex-wrap items-center gap-2">
                                 <form method="POST" action=(href!(submit)) class="flex min-w-48 flex-1 gap-2">
                                     <input type="hidden" name="action" value="rename">
@@ -122,7 +134,14 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
                     }
                 </ul>
             }
-        </main>
+            </div>
+                <aside class="glass rise rounded-2xl p-6 text-center" aria-label="Tip">
+                    <div class="art-empty float mx-auto aspect-[280/200] w-56 max-w-full" role="img" aria-label="An illustration of a clipboard with a checklist"></div>
+                    <h2 class="mt-3 text-lg font-bold">"Keep it tidy"</h2>
+                    <p class="mt-1 text-sm text-muted-foreground">"Lists are optional. Anything without one lives in the Inbox."</p>
+                </aside>
+            </div>
+        )
     })
 }
 

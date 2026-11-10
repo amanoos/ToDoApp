@@ -7,8 +7,8 @@ use topcoat::{
 /// Classes for a card with vertically stacked sections. Each section supplies its own
 /// horizontal padding so other content can span the full width.
 const CARD: StaticClass = class!(
-    "flex flex-col gap-5 rounded-xl border border-border bg-card py-6",
-    "text-card-foreground shadow-sm",
+    "glass flex flex-col gap-5 rounded-2xl py-6",
+    "text-card-foreground",
     "has-[>[data-slot=table]:first-child]:overflow-hidden",
     "has-[>[data-slot=table]:first-child]:pt-0",
     "has-[>[data-slot=table]:last-child]:overflow-hidden",

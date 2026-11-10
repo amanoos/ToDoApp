@@ -6,6 +6,7 @@ pub(crate) mod login;
 pub(crate) mod logout;
 pub(crate) mod register;
 pub(crate) mod reset;
+pub(crate) mod shell;
 pub(crate) mod todos;
 
 use topcoat::{
@@ -14,21 +15,17 @@ use topcoat::{
     context::Cx,
     cookie::CookieLayer,
     font::{Font, fontsource::fontsource_font},
-    icon::{icon, iconify::iconify_icon},
     router::{
-        RouterBuilder, RouterBuilderDiscoverExt, Slot, TrustedProxies, href, layout, module_router,
-        page,
+        RouterBuilder, RouterBuilderDiscoverExt, Slot, TrustedProxies,
+        error::{SeeOther, see_other},
+        href, layout, module_router, route,
     },
     runtime::RuntimeLayer,
     session::SessionLifetime,
     tailwind,
-    view::{View, attributes, view},
+    view::{View, view},
 };
 
-use crate::components::{
-    button::{ButtonSize, ButtonVariant, button_variants},
-    card::{card, card_content, card_description, card_header, card_title},
-};
 use crate::config::Config;
 use crate::features::{forgot::EmailSender, throttle::Throttle, user::SESSION_LIFETIME};
 use crate::security::SecurityHeaders;
@@ -92,7 +89,8 @@ async fn root(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>"todo-app"</title>
+                <title>"Topcoat To-Do"</title>
+                <meta name="theme-color" content="#0e7490">
                 <link rel="stylesheet" href=(tailwind::stylesheet!())>
                 topcoat::font::link(font: GEIST)
                 topcoat::runtime::script()
@@ -103,36 +101,9 @@ async fn root(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     })
 }
 
-#[page]
-async fn home(cx: &Cx) -> Result<impl View> {
-    Ok(view! {
-        <main class="mx-auto max-w-2xl px-4 py-16">
-            card(
-                card_header(
-                    card_title(
-                        icon(
-                            data: iconify_icon!("lucide:sparkles"),
-                            attrs: attributes! { class="inline-block" }
-                        )
-                        " "
-                        "todo-app"
-                    )
-                    card_description(
-                        "Edit "
-                        <code>"src/app.rs"</code>
-                        " and save to see your changes."
-                    )
-                )
-                card_content(
-                    // A link styled like a button, with the button component's classes.
-                    <a
-                        class=(button_variants(ButtonVariant::Primary, ButtonSize::Md))
-                        href=(href!(todos::page))
-                    >
-                        "Todo example"
-                    </a>
-                )
-            )
-        </main>
-    })
+/// The front door: send everyone to the todo list, which in turn sends logged-out visitors
+/// to the sign-in page.
+#[route(GET)]
+async fn home(cx: &Cx) -> Result<SeeOther> {
+    Ok(see_other(href!(todos::page).resolve(cx)))
 }

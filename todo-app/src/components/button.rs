@@ -31,8 +31,8 @@ impl ButtonVariant {
     fn classes(self) -> StaticClass {
         match self {
             Self::Primary => class!(
-                "border-transparent bg-primary text-primary-foreground shadow-xs",
-                "hover:bg-primary/90 active:bg-primary/80",
+                "border-transparent brand-gradient text-primary-foreground shadow-xs",
+                "hover:brightness-110 active:brightness-95",
             ),
             Self::Secondary => class!(
                 "border-transparent bg-foreground/5 text-foreground shadow-xs",

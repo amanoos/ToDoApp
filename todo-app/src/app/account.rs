@@ -12,11 +12,14 @@ use topcoat::{
     view::{View, attributes, view},
 };
 
+use crate::app::shell::{Nav, app_shell};
 use crate::components::button::{ButtonVariant, button};
 use crate::components::card::{card, card_content, card_description, card_header, card_title};
+use crate::components::icon::glyph;
 use crate::components::input::input;
 use crate::features::account::DeleteError;
 use crate::features::user::{self, PasswordError, require_user};
+use topcoat::icon::iconify::iconify_icon;
 
 #[query_params(error = redirect("?"))]
 struct AccountQuery {
@@ -35,10 +38,19 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
     let changed = query.ok.as_deref() == Some("1");
 
     Ok(view! {
-        <main class="mx-auto max-w-sm px-4 py-16">
-            <p class="mb-4 text-sm">
-                <a class="underline" href=(href!(crate::app::todos::page))>"Back to todos"</a>
-            </p>
+        app_shell(
+            email: user.email.clone(),
+            active: Nav::Account,
+            <div class="rise mb-6 flex items-center gap-4">
+                <span class="brand-gradient grid size-12 shrink-0 place-items-center rounded-2xl text-primary-foreground shadow-sm">
+                    glyph(data: iconify_icon!("lucide:user-round"), attrs: attributes! { class="size-6" })
+                </span>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight">"Your account"</h1>
+                    <p class="text-sm text-muted-foreground">"Signed in as " (&user.email)</p>
+                </div>
+            </div>
+            <div class="grid items-start gap-6 lg:grid-cols-2">
             card(
                 card_header(
                     card_title("Change password")
@@ -93,7 +105,7 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
                     </form>
                 )
             )
-            <div class="mt-6">
+            <div>
                 card(
                     card_header(
                         card_title("Delete account")
@@ -136,7 +148,8 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
                     )
                 )
             </div>
-        </main>
+            </div>
+        )
     })
 }
 

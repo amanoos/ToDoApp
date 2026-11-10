@@ -38,6 +38,14 @@ a snapshot.
 
 These cost real time. None is fatal; several are one-line fixes once you know.
 
+0. **The stock `icon` component sets an inline `style` attribute**, which a strict
+   Content-Security-Policy (`style-src 'self'`) blocks, logging one violation per icon. The icons still
+   draw, but the console fills with errors. This app renders icons through its own
+   `components/icon.rs`, the same SVG without the attribute. Likewise, anything dynamic that
+   would normally use `style=` (the progress ring's percentage) is done with a fixed set of
+   classes (`pct-0` to `pct-100`) and a registered CSS property, because Tailwind can only see
+   class names that appear literally in the source.
+
 1. **Generated method names collide with yours.** Toasty adds `create`, `update` and `delete` to
    every model, so a hand-written `Todo::update` is a compile error (E0592) pointing at the
    derive macro. Pick names like `add`, `save` and `remove`.

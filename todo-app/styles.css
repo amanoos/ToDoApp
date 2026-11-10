@@ -1,43 +1,22 @@
-/* Neutral, the built-in Topcoat theme.
+/* The app's theme: design tokens first, then a handful of hand-written pieces that Tailwind
+   utilities can't express (background art, animation, progress rings).
 
-   The theme is a small set of design tokens. Components refer to tokens only,
-   never to raw colors, so a project restyles itself by editing the values in
-   `:root` and `.dark` below.
+   The theme started as Topcoat's built-in "neutral" one and keeps its token names, so the
+   stock components (button, card, input) restyle themselves from the values below.
+   Components refer to tokens only, never to raw colors:
 
-     --background              the page background
-     --foreground              text and iconography on the background
-     --card                    cards and panel backgrounds
-     --card-foreground         text and iconography on cards and panels
-     --popover                 floating menu and popover backgrounds
-     --popover-foreground      text and iconography on floating surfaces
-     --muted-foreground        secondary text: captions, descriptions, placeholders
-     --primary                 the emphasis color: primary actions, selection, highlights
-     --primary-foreground      text on a primary-filled surface
-     --destructive             destructive actions and error states
-     --destructive-foreground  text on a destructive-filled surface
-     --border                  hairline borders and dividers
-     --ring                    the focus ring
-     --sidebar                 the sidebar background
-     --sidebar-foreground      sidebar text and icons
-     --sidebar-primary         primary actions inside the sidebar
-     --sidebar-primary-foreground  text on sidebar primary actions
-     --sidebar-accent          sidebar hover and selected backgrounds
-     --sidebar-accent-foreground   text on sidebar accents
-     --sidebar-border          sidebar borders and dividers
-     --sidebar-ring            sidebar focus rings
-     --shadow-xs               a subtle shadow for raised controls
-     --shadow-sm               a shadow for raised surfaces: cards, menus
+     --background / --foreground          page and text
+     --card / --card-foreground           panels (slightly see-through, so the backdrop glows)
+     --muted-foreground                   secondary text
+     --primary / --primary-2              the brand gradient: teal into deep blue
+     --accent                             the Rust-orange highlight
+     --success / --warning / --info       status colors (done, due soon, low priority)
+     --destructive                        errors, overdue, high priority
+     --border, --ring                     hairlines and the focus ring
 
-   Shadows are disabled by default. To enable them, replace the shadow values
-   in `:root` and `.dark` with the commented values beside them. Use `0 0 #0000`
-   to disable a shadow. Tailwind combines shadows and focus rings in one
-   `box-shadow`, so `none` would also break the ring.
-
-   Components derive hover and press states from their fill or foreground
-   color at reduced opacity. The sidebar has its own accent token for
-   interactive rows, so it can be themed independently.
-
-   The Geist font is not bundled here; provide it with topcoat-font. */
+   Everything here is served from our own origin: the Content-Security-Policy allows no
+   inline styles and no third-party images, so the artwork below is inline SVG in
+   `data:` URLs and the motion is plain CSS. */
 
 @import "tailwindcss";
 
@@ -49,9 +28,6 @@
    typically <html>. */
 @custom-variant dark (&:is(.dark *));
 
-/* Expose the tokens as Tailwind utilities (`bg-background`, `text-primary`,
-   `border-border`, ...). The indirection through plain variables on `:root`
-   and `.dark` is what lets the values swap when the color scheme changes. */
 @theme inline {
   --font-sans: "Geist", sans-serif;
   --color-background: var(--background);
@@ -62,7 +38,12 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-muted-foreground: var(--muted-foreground);
   --color-primary: var(--primary);
+  --color-primary-2: var(--primary-2);
   --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
@@ -77,72 +58,350 @@
   --color-sidebar-ring: var(--sidebar-ring);
   --shadow-xs: var(--shadow-xs);
   --shadow-sm: var(--shadow-sm);
+  --shadow-lift: var(--shadow-lift);
 }
 
 :root {
-  --background: oklch(0.9875 0.003 260);
-  --foreground: oklch(0.24 0.012 260);
-  --card: oklch(0.995 0.003 260);
-  --card-foreground: oklch(0.24 0.012 260);
-  --popover: oklch(0.995 0.003 260);
-  --popover-foreground: oklch(0.24 0.012 260);
-  --muted-foreground: oklch(0.51 0.014 260);
-  --primary: oklch(0.21 0.02 260);
-  --primary-foreground: oklch(0.985 0.003 260);
-  --destructive: oklch(0.55 0.2 27);
-  --destructive-foreground: oklch(0.99 0.012 27);
-  --border: oklch(0.9 0.008 260);
-  --ring: oklch(0.32 0.02 260);
-  --sidebar: oklch(0.995 0.003 260);
-  --sidebar-foreground: oklch(0.24 0.012 260);
-  --sidebar-primary: oklch(0.21 0.02 260);
-  --sidebar-primary-foreground: oklch(0.985 0.003 260);
+  --background: oklch(0.975 0.014 205);
+  --foreground: oklch(0.24 0.04 250);
+  --card: oklch(1 0.004 200 / 78%);
+  --card-foreground: oklch(0.24 0.04 250);
+  --popover: oklch(0.995 0.004 200);
+  --popover-foreground: oklch(0.24 0.04 250);
+  --muted-foreground: oklch(0.47 0.035 250);
+  --primary: oklch(0.5 0.105 197);
+  --primary-2: oklch(0.44 0.13 245);
+  --primary-foreground: oklch(0.99 0.004 200);
+  --accent: oklch(0.7 0.17 50);
+  --success: oklch(0.58 0.15 155);
+  --warning: oklch(0.72 0.15 75);
+  --info: oklch(0.6 0.13 235);
+  --destructive: oklch(0.55 0.21 22);
+  --destructive-foreground: oklch(0.99 0.012 22);
+  --border: oklch(0.88 0.022 215);
+  --ring: oklch(0.55 0.12 200);
+  --sidebar: oklch(0.995 0.004 200);
+  --sidebar-foreground: oklch(0.24 0.04 250);
+  --sidebar-primary: oklch(0.5 0.105 197);
+  --sidebar-primary-foreground: oklch(0.99 0.004 200);
   --sidebar-accent: color-mix(in oklab, var(--sidebar-foreground) 10%, var(--sidebar));
-  --sidebar-accent-foreground: oklch(0.24 0.012 260);
-  --sidebar-border: oklch(0.9 0.008 260);
-  --sidebar-ring: oklch(0.32 0.02 260);
-  /* Use these values to enable shadows:
-  --shadow-xs: 0 1px 2px oklch(0.24 0.02 260 / 12%);
+  --sidebar-accent-foreground: oklch(0.24 0.04 250);
+  --sidebar-border: oklch(0.88 0.022 215);
+  --sidebar-ring: oklch(0.55 0.12 200);
+  --shadow-xs: 0 1px 2px oklch(0.3 0.06 230 / 12%);
   --shadow-sm:
-    0 1px 2px oklch(0.24 0.02 260 / 10%),
-    0 2px 8px -2px oklch(0.24 0.02 260 / 9%); */
-  --shadow-xs: 0 0 #0000;
-  --shadow-sm: 0 0 #0000;
+    0 1px 2px oklch(0.3 0.06 230 / 8%),
+    0 6px 20px -8px oklch(0.4 0.1 220 / 22%);
+  --shadow-lift:
+    0 2px 4px oklch(0.3 0.06 230 / 8%),
+    0 18px 40px -14px oklch(0.4 0.12 220 / 35%);
 }
 
 .dark {
-  --background: oklch(0.17 0.012 260);
-  --foreground: oklch(0.93 0.006 260);
-  --card: oklch(0.22 0.012 260);
-  --card-foreground: oklch(0.93 0.006 260);
-  --popover: oklch(0.22 0.012 260);
-  --popover-foreground: oklch(0.93 0.006 260);
-  --muted-foreground: oklch(0.68 0.012 260);
-  --primary: oklch(0.92 0.008 260);
-  --primary-foreground: oklch(0.21 0.015 260);
-  --destructive: oklch(0.66 0.18 25);
-  --destructive-foreground: oklch(0.14 0.02 25);
-  --border: oklch(0.3 0.012 260);
-  --ring: oklch(0.6 0.02 260);
-  --sidebar: oklch(0.22 0.012 260);
-  --sidebar-foreground: oklch(0.93 0.006 260);
-  --sidebar-primary: oklch(0.92 0.008 260);
-  --sidebar-primary-foreground: oklch(0.21 0.015 260);
+  --background: oklch(0.17 0.025 250);
+  --foreground: oklch(0.94 0.01 220);
+  --card: oklch(0.24 0.03 250 / 80%);
+  --card-foreground: oklch(0.94 0.01 220);
+  --popover: oklch(0.24 0.03 250);
+  --popover-foreground: oklch(0.94 0.01 220);
+  --muted-foreground: oklch(0.72 0.025 230);
+  --primary: oklch(0.74 0.12 190);
+  --primary-2: oklch(0.65 0.14 245);
+  --primary-foreground: oklch(0.16 0.03 250);
+  --accent: oklch(0.74 0.16 50);
+  --success: oklch(0.72 0.16 155);
+  --warning: oklch(0.8 0.14 80);
+  --info: oklch(0.72 0.12 235);
+  --destructive: oklch(0.68 0.19 22);
+  --destructive-foreground: oklch(0.14 0.02 22);
+  --border: oklch(0.34 0.03 250);
+  --ring: oklch(0.7 0.12 195);
+  --sidebar: oklch(0.24 0.03 250);
+  --sidebar-foreground: oklch(0.94 0.01 220);
+  --sidebar-primary: oklch(0.74 0.12 190);
+  --sidebar-primary-foreground: oklch(0.16 0.03 250);
   --sidebar-accent: color-mix(in oklab, var(--sidebar-foreground) 10%, var(--sidebar));
-  --sidebar-accent-foreground: oklch(0.93 0.006 260);
-  --sidebar-border: oklch(0.3 0.012 260);
-  --sidebar-ring: oklch(0.6 0.02 260);
-  /* Use these values to enable shadows:
+  --sidebar-accent-foreground: oklch(0.94 0.01 220);
+  --sidebar-border: oklch(0.34 0.03 250);
+  --sidebar-ring: oklch(0.7 0.12 195);
   --shadow-xs: 0 1px 2px oklch(0 0 0 / 35%);
-  --shadow-sm:
-    0 1px 2px oklch(0 0 0 / 35%),
-    0 2px 8px -2px oklch(0 0 0 / 30%); */
-  --shadow-xs: 0 0 #0000;
-  --shadow-sm: 0 0 #0000;
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 35%), 0 6px 20px -8px oklch(0 0 0 / 45%);
+  --shadow-lift: 0 2px 4px oklch(0 0 0 / 30%), 0 18px 40px -14px oklch(0 0 0 / 55%);
 }
 
 @layer base {
+  html {
+    scrollbar-gutter: stable;
+  }
+
   body {
     @apply bg-background font-sans text-foreground;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 28%, transparent);
   }
 }
+
+/* ---------------------------------------------------------------- backdrop --
+   Soft colored light behind everything, plus a faint dot grid. Both are fixed to
+   the window, so the page never looks blank however little content it has. */
+
+@layer components {
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -20%;
+    z-index: -2;
+    pointer-events: none;
+    background:
+      radial-gradient(38% 34% at 12% 14%, oklch(0.86 0.1 190 / 70%), transparent 70%),
+      radial-gradient(34% 30% at 88% 10%, oklch(0.88 0.1 60 / 60%), transparent 70%),
+      radial-gradient(42% 38% at 78% 92%, oklch(0.86 0.09 235 / 60%), transparent 70%),
+      radial-gradient(30% 30% at 8% 88%, oklch(0.9 0.09 340 / 40%), transparent 70%);
+    animation: drift 28s ease-in-out infinite alternate;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image: radial-gradient(circle at 2px 2px, oklch(0.45 0.08 220 / 22%) 1.2px, transparent 1.6px);
+    background-size: 28px 28px;
+    mask-image: linear-gradient(to bottom, black, transparent 85%);
+    -webkit-mask-image: linear-gradient(to bottom, black, transparent 85%);
+  }
+
+  .dark body::before {
+    background:
+      radial-gradient(38% 34% at 12% 14%, oklch(0.45 0.1 190 / 55%), transparent 70%),
+      radial-gradient(34% 30% at 88% 10%, oklch(0.5 0.12 50 / 40%), transparent 70%),
+      radial-gradient(42% 38% at 78% 92%, oklch(0.42 0.12 250 / 55%), transparent 70%),
+      radial-gradient(30% 30% at 8% 88%, oklch(0.4 0.12 330 / 35%), transparent 70%);
+  }
+
+  /* Frosted panels: cards stay readable while the backdrop shows through. */
+  .glass {
+    background: var(--card);
+    border: 1px solid color-mix(in oklab, var(--border) 80%, white);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .glass-strong {
+    background: color-mix(in oklab, var(--card) 92%, white);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(18px) saturate(1.4);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  }
+
+  /* The brand gradient, for logos, hero banners and the main action. */
+  .brand-gradient {
+    background-image: linear-gradient(135deg, var(--primary), var(--primary-2));
+  }
+
+  .brand-text {
+    background-image: linear-gradient(100deg, var(--primary), var(--primary-2) 55%, var(--accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    background-size: 200% 100%;
+    animation: shimmer 8s linear infinite;
+  }
+
+  /* ------------------------------------------------------------- artwork -- */
+
+  /* Sign-in side panel: a deep gradient, a dot grid and the illustration. */
+  .auth-panel {
+    background:
+      radial-gradient(60% 50% at 80% 8%, oklch(0.75 0.17 55 / 55%), transparent 70%),
+      radial-gradient(70% 60% at 10% 100%, oklch(0.55 0.15 200 / 70%), transparent 70%),
+      linear-gradient(150deg, oklch(0.42 0.11 200), oklch(0.3 0.12 255));
+  }
+
+  .auth-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle at 2px 2px, oklch(1 0 0 / 22%) 1.2px, transparent 1.6px);
+    background-size: 26px 26px;
+    mask-image: linear-gradient(to bottom, black, transparent);
+    -webkit-mask-image: linear-gradient(to bottom, black, transparent);
+  }
+
+  .art-hero {
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 520 560'%3E%3Cdefs%3E%3ClinearGradient id='bar' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='rgb(20,184,166)'/%3E%3Cstop offset='1' stop-color='rgb(251,146,60)'/%3E%3C/linearGradient%3E%3ClinearGradient id='cardg' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='rgb(255,255,255)'/%3E%3Cstop offset='1' stop-color='rgb(236,253,250)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='260' cy='290' r='225' fill='rgb(255,255,255)' fill-opacity='.10'/%3E%3Ccircle cx='260' cy='290' r='170' fill='none' stroke='rgb(255,255,255)' stroke-opacity='.28' stroke-dasharray='4 10' stroke-width='2'/%3E%3Cg transform='rotate(-4 260 290)'%3E%3Crect x='70' y='124' width='380' height='330' rx='30' fill='rgb(8,47,73)' fill-opacity='.28'/%3E%3Crect x='70' y='110' width='380' height='330' rx='30' fill='url(%23cardg)'/%3E%3Ccircle cx='116' cy='160' r='20' fill='rgb(20,184,166)'/%3E%3Cpath d='M107 160l7 7 13-14' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='148' y='148' width='150' height='12' rx='6' fill='rgb(15,23,42)' fill-opacity='.85'/%3E%3Crect x='148' y='168' width='96' height='9' rx='4.5' fill='rgb(100,116,139)' fill-opacity='.45'/%3E%3Crect x='370' y='146' width='54' height='28' rx='14' fill='rgb(20,184,166)' fill-opacity='.16'/%3E%3Crect x='384' y='156' width='26' height='8' rx='4' fill='rgb(15,118,110)'/%3E%3Cg%3E%3Crect x='96' y='206' width='328' height='62' rx='16' fill='white'/%3E%3Crect x='96' y='206' width='6' height='62' rx='3' fill='rgb(244,63,94)'/%3E%3Ccircle cx='132' cy='237' r='15' fill='rgb(34,197,94)'/%3E%3Cpath d='M125 237l5 5 9-10' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='162' y='225' width='140' height='11' rx='5.5' fill='rgb(100,116,139)' fill-opacity='.55'/%3E%3Crect x='162' y='245' width='90' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.5'/%3E%3Crect x='346' y='224' width='62' height='26' rx='13' fill='rgb(244,63,94)' fill-opacity='.14'/%3E%3Crect x='360' y='234' width='34' height='7' rx='3.5' fill='rgb(225,29,72)'/%3E%3C/g%3E%3Cg%3E%3Crect x='96' y='282' width='328' height='62' rx='16' fill='white'/%3E%3Crect x='96' y='282' width='6' height='62' rx='3' fill='rgb(245,158,11)'/%3E%3Ccircle cx='132' cy='313' r='15' fill='rgb(34,197,94)'/%3E%3Cpath d='M125 313l5 5 9-10' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='162' y='301' width='170' height='11' rx='5.5' fill='rgb(100,116,139)' fill-opacity='.55'/%3E%3Crect x='162' y='321' width='70' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.5'/%3E%3Crect x='346' y='300' width='62' height='26' rx='13' fill='rgb(245,158,11)' fill-opacity='.16'/%3E%3Crect x='360' y='310' width='34' height='7' rx='3.5' fill='rgb(217,119,6)'/%3E%3C/g%3E%3Cg%3E%3Crect x='96' y='358' width='328' height='62' rx='16' fill='white'/%3E%3Crect x='96' y='358' width='6' height='62' rx='3' fill='rgb(14,165,233)'/%3E%3Ccircle cx='132' cy='389' r='14' fill='none' stroke='rgb(148,163,184)' stroke-width='3'/%3E%3Crect x='162' y='377' width='120' height='11' rx='5.5' fill='rgb(15,23,42)' fill-opacity='.8'/%3E%3Crect x='162' y='397' width='100' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.5'/%3E%3Crect x='346' y='376' width='62' height='26' rx='13' fill='rgb(14,165,233)' fill-opacity='.14'/%3E%3Crect x='360' y='386' width='34' height='7' rx='3.5' fill='rgb(2,132,199)'/%3E%3C/g%3E%3C/g%3E%3Cg transform='rotate(7 420 90)'%3E%3Crect x='346' y='58' width='150' height='84' rx='20' fill='rgb(8,47,73)' fill-opacity='.25'/%3E%3Crect x='346' y='48' width='150' height='84' rx='20' fill='white'/%3E%3Ccircle cx='382' cy='90' r='18' fill='rgb(251,146,60)'/%3E%3Cpath d='M373 90l7 7 12-14' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='410' y='78' width='66' height='10' rx='5' fill='rgb(15,23,42)' fill-opacity='.8'/%3E%3Crect x='410' y='96' width='44' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.6'/%3E%3C/g%3E%3Cg transform='rotate(-6 120 470)'%3E%3Crect x='36' y='450' width='170' height='62' rx='31' fill='rgb(8,47,73)' fill-opacity='.25'/%3E%3Crect x='36' y='440' width='170' height='62' rx='31' fill='white'/%3E%3Crect x='54' y='452' width='38' height='38' rx='19' fill='url(%23bar)'/%3E%3Cpath d='M64 471l7 7 12-14' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='102' y='456' width='84' height='10' rx='5' fill='rgb(15,23,42)' fill-opacity='.8'/%3E%3Crect x='102' y='474' width='56' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.6'/%3E%3C/g%3E%3Cg fill='rgb(253,224,71)'%3E%3Cpath d='M70 70l6 18 18 6-18 6-6 18-6-18-18-6 18-6z'/%3E%3Cpath d='M470 300l4 12 12 4-12 4-4 12-4-12-12-4 12-4z'/%3E%3Cpath d='M300 500l3 9 9 3-9 3-3 9-3-9-9-3 9-3z'/%3E%3C/g%3E%3Ccircle cx='440' cy='470' r='7' fill='rgb(251,146,60)'/%3E%3Ccircle cx='42' cy='260' r='6' fill='rgb(94,234,212)'/%3E%3Ccircle cx='480' cy='200' r='5' fill='rgb(255,255,255)' fill-opacity='.8'/%3E%3Ccircle cx='350' cy='520' r='5' fill='rgb(253,164,175)'/%3E%3Ccircle cx='180' cy='60' r='5' fill='rgb(255,255,255)' fill-opacity='.7'/%3E%3Crect x='30' y='330' width='14' height='14' rx='3' fill='rgb(253,224,71)' transform='rotate(25 37 337)'/%3E%3Crect x='470' y='400' width='12' height='12' rx='3' fill='rgb(94,234,212)' transform='rotate(-20 476 406)'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+
+  .art-empty {
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 280 200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y1='0' y2='1'%3E%3Cstop offset='0' stop-color='rgb(20,184,166)'/%3E%3Cstop offset='1' stop-color='rgb(14,116,144)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cellipse cx='140' cy='176' rx='96' ry='10' fill='rgb(15,23,42)' fill-opacity='.08'/%3E%3Ccircle cx='140' cy='96' r='78' fill='rgb(20,184,166)' fill-opacity='.10'/%3E%3Crect x='84' y='34' width='112' height='140' rx='16' fill='url(%23g)'/%3E%3Crect x='94' y='46' width='92' height='120' rx='9' fill='white'/%3E%3Crect x='116' y='26' width='48' height='20' rx='9' fill='rgb(251,146,60)'/%3E%3Ccircle cx='122' cy='76' r='9' fill='rgb(34,197,94)'/%3E%3Cpath d='M117 76l4 4 7-8' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='138' y='72' width='38' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.7'/%3E%3Ccircle cx='122' cy='108' r='9' fill='rgb(34,197,94)'/%3E%3Cpath d='M117 108l4 4 7-8' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='138' y='104' width='30' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.7'/%3E%3Ccircle cx='122' cy='140' r='8' fill='none' stroke='rgb(148,163,184)' stroke-width='2.5'/%3E%3Crect x='138' y='136' width='34' height='8' rx='4' fill='rgb(148,163,184)' fill-opacity='.45'/%3E%3Cg fill='rgb(250,204,21)'%3E%3Cpath d='M214 40l4 11 11 4-11 4-4 11-4-11-11-4 11-4z'/%3E%3Cpath d='M56 70l3 8 8 3-8 3-3 8-3-8-8-3 8-3z'/%3E%3C/g%3E%3Ccircle cx='226' cy='128' r='5' fill='rgb(251,146,60)'/%3E%3Ccircle cx='48' cy='142' r='4' fill='rgb(94,234,212)'/%3E%3Ccircle cx='200' cy='168' r='3' fill='rgb(244,114,182)'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+
+  /* The dashboard banner. */
+  .banner {
+    background:
+      radial-gradient(40% 90% at 96% 0%, oklch(0.78 0.16 55 / 65%), transparent 70%),
+      radial-gradient(50% 80% at 0% 100%, oklch(0.62 0.13 200 / 70%), transparent 70%),
+      linear-gradient(120deg, oklch(0.46 0.11 205), oklch(0.36 0.13 255));
+  }
+
+  .banner::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle at 2px 2px, oklch(1 0 0 / 20%) 1.2px, transparent 1.6px);
+    background-size: 22px 22px;
+    mask-image: linear-gradient(100deg, black, transparent 75%);
+    -webkit-mask-image: linear-gradient(100deg, black, transparent 75%);
+  }
+
+  /* --------------------------------------------------------- progress ring -- */
+
+  @property --p {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+  }
+
+  /* `pct-N` sets --p; the ring and the bar draw it, and animate between values. */
+  .ring {
+    --p: 0;
+    position: relative;
+    border-radius: 9999px;
+    background:
+      conic-gradient(from 0deg, var(--primary), var(--success) calc(var(--p) * 1%), color-mix(in oklab, var(--border) 70%, transparent) 0);
+    transition: --p 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .ring::after {
+    content: "";
+    position: absolute;
+    inset: 12px;
+    border-radius: 9999px;
+    background: color-mix(in oklab, var(--background), white 65%);
+  }
+
+  .bar-fill {
+    --p: 0;
+    width: calc(var(--p) * 1%);
+    transition: --p 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* -------------------------------------------------------------- motion -- */
+
+  .rise {
+    animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .pop {
+    animation: pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
+  .float {
+    animation: float 7s ease-in-out infinite;
+  }
+
+  .float-slow {
+    animation: float 11s ease-in-out infinite reverse;
+  }
+
+  .stagger > * {
+    animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .stagger > :nth-child(1) { animation-delay: 0.02s; }
+  .stagger > :nth-child(2) { animation-delay: 0.06s; }
+  .stagger > :nth-child(3) { animation-delay: 0.1s; }
+  .stagger > :nth-child(4) { animation-delay: 0.14s; }
+  .stagger > :nth-child(5) { animation-delay: 0.18s; }
+  .stagger > :nth-child(6) { animation-delay: 0.22s; }
+  .stagger > :nth-child(7) { animation-delay: 0.26s; }
+  .stagger > :nth-child(8) { animation-delay: 0.3s; }
+  .stagger > :nth-child(n + 9) { animation-delay: 0.34s; }
+
+  /* Cards that lift when pointed at. */
+  .lift {
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lift);
+    border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+  }
+
+  /* The pulse behind the "today" marker. */
+  .pulse-dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: currentColor;
+    animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+}
+
+@keyframes drift {
+  from { transform: translate3d(-2%, -1%, 0) scale(1); }
+  to { transform: translate3d(2%, 2%, 0) scale(1.06); }
+}
+
+@keyframes shimmer {
+  to { background-position: 200% 0; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes pop {
+  0% { opacity: 0; transform: scale(0.6); }
+  70% { opacity: 1; transform: scale(1.06); }
+  100% { opacity: 1; transform: none; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-12px) rotate(0.8deg); }
+}
+
+@keyframes ping {
+  75%, 100% { transform: scale(2.4); opacity: 0; }
+}
+
+/* People who ask their system for less motion get none. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* pct-0 ... pct-100 in steps of five: the numbers the ring and bars draw. */
+.pct-0 { --p: 0; }
+.pct-5 { --p: 5; }
+.pct-10 { --p: 10; }
+.pct-15 { --p: 15; }
+.pct-20 { --p: 20; }
+.pct-25 { --p: 25; }
+.pct-30 { --p: 30; }
+.pct-35 { --p: 35; }
+.pct-40 { --p: 40; }
+.pct-45 { --p: 45; }
+.pct-50 { --p: 50; }
+.pct-55 { --p: 55; }
+.pct-60 { --p: 60; }
+.pct-65 { --p: 65; }
+.pct-70 { --p: 70; }
+.pct-75 { --p: 75; }
+.pct-80 { --p: 80; }
+.pct-85 { --p: 85; }
+.pct-90 { --p: 90; }
+.pct-95 { --p: 95; }
+.pct-100 { --p: 100; }

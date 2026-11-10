@@ -10,12 +10,15 @@ use topcoat::{
     view::{View, attributes, view},
 };
 
+use crate::app::shell::{Nav, app_shell};
 use crate::components::button::{ButtonSize, ButtonVariant, button, button_variants};
 use crate::components::card::{card, card_content, card_header, card_title};
+use crate::components::icon::glyph;
 use crate::components::input::input;
 use crate::features::list::List;
 use crate::features::todo::{FieldError, MAX_NOTES_LEN, Priority, Todo, TodoInput};
 use crate::features::user::require_user;
+use topcoat::icon::iconify::iconify_icon;
 
 const PRIORITIES: [Priority; 3] = [Priority::Low, Priority::Medium, Priority::High];
 
@@ -46,7 +49,19 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
     let current_list = todo.list_id;
 
     Ok(view! {
-        <main class="mx-auto max-w-xl px-4 py-16">
+        app_shell(
+            email: user.email.clone(),
+            active: Nav::Todos,
+            <div class="rise mb-6 flex items-center gap-4">
+                <span class="brand-gradient grid size-12 shrink-0 place-items-center rounded-2xl text-primary-foreground shadow-sm">
+                    glyph(data: iconify_icon!("lucide:pencil"), attrs: attributes! { class="size-6" })
+                </span>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight">"Edit todo"</h1>
+                    <p class="text-sm text-muted-foreground">"Change the details, then save."</p>
+                </div>
+            </div>
+            <div class="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
             card(
                 card_header(card_title("Edit todo"))
                 card_content(
@@ -131,7 +146,13 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
                     </form>
                 )
             )
-        </main>
+            <aside class="glass rise rounded-2xl p-6 text-center" aria-label="Tip">
+                <div class="art-empty float mx-auto aspect-[280/200] w-56 max-w-full" role="img" aria-label="An illustration of a clipboard with a checklist"></div>
+                <h2 class="mt-3 text-lg font-bold">"Make it specific"</h2>
+                <p class="mt-1 text-sm text-muted-foreground">"A clear title, a due date and a priority make a todo easy to pick up later."</p>
+            </aside>
+            </div>
+        )
     })
 }
 

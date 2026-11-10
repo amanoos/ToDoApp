@@ -10,6 +10,7 @@ use topcoat::{
     view::{View, attributes, view},
 };
 
+use crate::app::shell::auth_shell;
 use crate::components::button::button;
 use crate::components::card::{card, card_content, card_description, card_header, card_title};
 use crate::components::input::input;
@@ -43,7 +44,7 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
     };
 
     Ok(view! {
-        <main class="mx-auto max-w-sm px-4 py-16">
+        auth_shell(
             card(
                 card_header(
                     card_title("Choose a new password")
@@ -92,7 +93,7 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
                     }
                 )
             )
-        </main>
+        )
     })
 }
 
