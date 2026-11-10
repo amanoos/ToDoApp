@@ -1,6 +1,6 @@
 name: CI
 
-# Treat the `todo-app` directory as the root of the repository.
+# The Rust project lives in `todo-app/`.
 on:
   push:
   pull_request:
@@ -15,6 +15,9 @@ jobs:
   check:
     name: Format, lint, test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: todo-app
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +26,8 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: todo-app
 
       # The build script downloads the Tailwind CLI, so this job needs network access.
       - run: cargo fmt --check
@@ -40,7 +45,7 @@ jobs:
       # Builds the release executable and its asset bundle, as a deployment would.
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./todo-app
           push: false
           tags: todo-app:ci
           cache-from: type=gha
