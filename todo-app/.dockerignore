@@ -1,0 +1,13 @@
+# Keep the build context small and free of local state.
+target
+data.db
+data.db-shm
+data.db-wal
+.git
+.github
+.env
+docs
+deploy
+*.md
+docker-compose.yml
+Dockerfile

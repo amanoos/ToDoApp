@@ -1,0 +1,5 @@
+/target
+/data.db*
+# Local settings and backups never belong in the repository.
+/.env
+/backup/

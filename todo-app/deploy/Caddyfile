@@ -1,0 +1,12 @@
+# Caddy terminates HTTPS (obtaining and renewing certificates automatically for a real
+# domain, or using a local certificate for `localhost`) and forwards to the app.
+#
+# SITE_ADDRESS comes from docker-compose.yml: a domain such as todo.example.com, or
+# `localhost` for a local trial.
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	# Caddy sets X-Forwarded-For to the address it actually saw and discards any value a
+	# client sent, which is what the app's TRUSTED_PROXY_HOPS=1 setting relies on.
+	reverse_proxy app:3000
+}

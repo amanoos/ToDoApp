@@ -1,0 +1,62 @@
+# The app behind a Caddy reverse proxy that terminates HTTPS.
+#
+#   docker compose up -d --build
+#   open https://localhost            (or set SITE_ADDRESS to your domain)
+#
+# See docs/DEPLOYMENT.md. Settings can be put in a `.env` file next to this one.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Exactly one reverse proxy (Caddy) sits in front, and the app's port is not
+      # published, so every request passes through it. The app then reads the client's
+      # address from the proxy's X-Forwarded-For header, which the login rate limiter uses.
+      TRUSTED_PROXY_HOPS: "1"
+      # Clients reach the site over HTTPS, so tell browsers to keep doing so.
+      ENABLE_HSTS: "1"
+      # Nobody can sign up through the website. Create the first account with
+      #   printf '%s\n' "a long password" | docker compose exec -T app /app/todo-app create-user you@example.com
+      # (see docs/DEPLOYMENT.md). Set REGISTRATION=open in .env to allow sign-ups.
+      REGISTRATION: "${REGISTRATION:-closed}"
+      # The site's public address (for example https://todo.example.com), so that
+      #   docker compose exec -T app /app/todo-app reset-link someone@example.com
+      # can print a complete link. Optional; set it in .env.
+      PUBLIC_URL: "${PUBLIC_URL:-}"
+      # Optional: email password reset links. Set SMTP_URL, MAIL_FROM and an https PUBLIC_URL
+      # in .env (docs/DEPLOYMENT.md, "Forgotten passwords"). Empty means email is off.
+      SMTP_URL: "${SMTP_URL:-}"
+      MAIL_FROM: "${MAIL_FROM:-}"
+    volumes:
+      - app-data:/data
+    # The app writes only to its database volume.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # No `ports:` on purpose: only the proxy can reach the app.
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-localhost}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
