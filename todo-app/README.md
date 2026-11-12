@@ -2,8 +2,11 @@
 
 A to-do app written entirely in Rust on [Topcoat](https://github.com/tokio-rs/topcoat), the
 full-stack web framework from the Tokio team. It is a proof of concept: small enough to read in
-an afternoon, but complete enough to show a real app (accounts, a database, interactive UI,
-security, deployment) without WebAssembly and without a line of hand-written JavaScript.
+an afternoon, but complete enough to show a real app (accounts, a SQL Server database,
+interactive UI, security, deployment) without WebAssembly and without a line of hand-written
+JavaScript. The database is Microsoft SQL Server, reached from Rust through Microsoft's own
+[mssql-rs](https://github.com/microsoft/mssql-rs) driver (`mssql-tds`) with plain, parameterized
+T-SQL.
 
 > Topcoat is early-stage (0.x) and expects breaking changes. This project pins exact versions;
 > see [docs/DX-NOTES.md](docs/DX-NOTES.md) for an honest account of what worked and what didn't.
@@ -32,17 +35,20 @@ security, deployment) without WebAssembly and without a line of hand-written Jav
 
 ## Quick start
 
-You need a recent stable Rust toolchain and network access (the first build downloads the
-Tailwind CLI and the font files).
+You need a recent stable Rust toolchain, Docker (for the database), and network access (the first
+build downloads the Tailwind CLI and the font files).
 
 ```sh
+docker compose -f docker-compose.dev.yml up -d --wait   # SQL Server on 127.0.0.1:1433
 cargo install topcoat-cli --version 0.12.0 --locked
 topcoat dev
 ```
 
 Open <http://127.0.0.1:3000> (if that port is busy, `topcoat dev` picks the next free one and
-prints it) and create an account. The database (`data.db`) and its tables are created for you;
-edits to the source rebuild and refresh the page automatically.
+prints it) and create an account. The `todoapp` database and its tables are created for you on
+the first start; edits to the source rebuild and refresh the page automatically. The app's default
+`DATABASE_URL` points at that container, so no configuration is needed. (The first start of the
+SQL Server image takes a while to download: it is about 2.2 GB on disk.)
 
 For scale: from a clean copy of the project (no `target/`, no database), `topcoat dev` was serving
 the login page after 78 seconds and sign-up worked, on a machine whose Cargo download cache was
@@ -56,7 +62,7 @@ Everything is optional. Copy [`.env.example`](.env.example) for a documented tem
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Where to listen. |
-| `DATABASE_URL` | `sqlite:data.db` | The SQLite database file. |
+| `DATABASE_URL` | the local dev container | The SQL Server database, `sqlserver://user:password@host:1433/database`, with optional `?trust_server_certificate=true` and `encrypt=true\|false\|strict`. The database is created if it does not exist. |
 | `MIGRATE_ON_START` | `true` | Apply pending database migrations at startup. |
 | `REGISTRATION` | `open` | Who may sign up: `open`, `closed` (nobody; use `create-user`), or `first-user` (until the first account exists). The compose file defaults to `closed`. |
 | `PUBLIC_URL` | none | The site's public address (no path), so `reset-link` can print complete links and emailed links point at your site. |
@@ -124,25 +130,27 @@ or expires.
 ## Working on it
 
 ```sh
-cargo test                                   # 100+ unit tests, including database tests
+docker compose -f docker-compose.dev.yml up -d --wait   # the tests need SQL Server
+cargo test                                   # 160+ tests, most of them against the database
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The database tests run against an in-memory SQLite database. One of them builds the schema
-**only from the embedded migrations** and then uses every model, so it fails if you change a
-model without generating a migration.
+The database tests run against a real SQL Server, the same container as development (set
+`TEST_DATABASE_URL` to use another server). Every test creates its own throwaway database and
+drops it afterwards, so tests run in parallel and each starts with empty tables. One of them
+builds the schema **only from the embedded migrations** and then uses every table and column
+through the real data layer, so it fails if the code and the schema drift apart. CI runs the
+same tests against a SQL Server service container.
 
-After changing a model:
+To change the schema, add a numbered T-SQL file to `migrations/` (for example
+`0002_add_tags.sql`) and list it in `MIGRATIONS` in `src/db.rs`. Never edit a migration that has
+been released. Migrations are compiled into the executable and applied at startup, in one
+transaction under a lock, and recorded in the `dbo.schema_migrations` table.
 
-```sh
-cargo run -- toasty migration generate       # writes toasty/migrations/NNNN_migration.sql
-```
-
-Read the generated SQL. SQLite cannot add a `NOT NULL` column without a default to a table that
-already has rows, so such a migration needs a hand-written `DEFAULT` (see
-`toasty/migrations/0002_migration.sql`). Then rebuild: migrations are compiled into the
-executable and applied at startup.
+The queries are hand-written T-SQL with `@P1, @P2, ...` parameters, sent through
+`db::Db` (a connection pool over [mssql-rs](https://github.com/microsoft/mssql-rs)). Values are
+never pasted into the SQL text.
 
 ## Project layout
 
@@ -152,10 +160,11 @@ executable and applied at startup.
 | `src/features/` | Everything a feature owns: `todo` (model, validation, sorting, search), `list`, `user` (accounts, sessions), `reset` (one-time links), `forgot` (emailing them), `throttle` (rate limiter). Pure logic is unit-tested here. |
 | `src/components/` | Shared UI components (button, input, card, `glyph` for icons). |
 | `src/security.rs` | The security-headers layer and the Content-Security-Policy. |
-| `src/config.rs`, `src/db.rs`, `src/healthcheck.rs` | Settings, the database and embedded migrations, the container health check. |
+| `src/config.rs`, `src/db.rs`, `src/healthcheck.rs` | Settings, the SQL Server connection pool and migration runner, the container health check. |
 | `styles.css` | The theme: color tokens, backdrop, SVG artwork and animation. Restyle the app here. |
-| `toasty/` | Database migrations. Commit them with the code. |
-| `Dockerfile`, `docker-compose.yml`, `deploy/` | Container image, compose stack, Caddy config. |
+| `migrations/` | The database schema as numbered T-SQL files. Commit them with the code. |
+| `Dockerfile`, `docker-compose.yml`, `deploy/` | Container image, compose stack (app, SQL Server, Caddy), Caddy config. |
+| `docker-compose.dev.yml` | Just SQL Server, on 127.0.0.1:1433, for development and tests. |
 | `docs/` | Deployment guide and developer-experience notes. |
 
 Pages use features and components; features never import from `app`.
@@ -163,16 +172,19 @@ Pages use features and components; features never import from `app`.
 ## Deploying
 
 ```sh
+cp .env.example .env        # set MSSQL_SA_PASSWORD (and SITE_ADDRESS)
 docker compose up -d --build
 ```
 
-starts the app behind Caddy with automatic HTTPS. Read
+starts the app, a SQL Server container and Caddy with automatic HTTPS. Read
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) first: the login cookie requires HTTPS, backups and
-upgrades have a procedure, and the app is designed for a single instance.
+upgrades have a procedure, and the app is designed for a single instance. For an on-premises
+Windows Server, without Docker, see [docs/DEPLOYMENT-WINDOWS.md](docs/DEPLOYMENT-WINDOWS.md).
 
 ## Known limitations
 
-- Single instance only: the login rate limiter is in memory and the database is SQLite.
+- Single app instance only: the login rate limiter is in memory. (SQL Server itself could serve
+  several, but the limiter would then be per instance.)
 - Email is used for one thing only: reset links, as a plain-text message, sent once with no queue
   or retries and no bounce handling (the app learns only that the mail server accepted it).
   There is no email verification, so an account's address is whatever was typed at sign-up, and
@@ -184,5 +196,7 @@ upgrades have a procedure, and the app is designed for a single instance.
 ## Documentation
 
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): running it for real.
+- [docs/DEPLOYMENT-WINDOWS.md](docs/DEPLOYMENT-WINDOWS.md): running it on an on-premises Windows
+  Server, as a service.
 - [docs/DX-NOTES.md](docs/DX-NOTES.md): what building with Rust and Topcoat was like.
 - [Topcoat's own guides](https://github.com/tokio-rs/topcoat/tree/main/docs).

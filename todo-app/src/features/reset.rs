@@ -15,11 +15,13 @@ use topcoat::{
     context::{Cx, context},
 };
 
+use mssql_tiberius_bridge::Row;
+
 use super::{
     throttle::{Limit, Throttle},
-    user::{self, SessionRecord, User},
+    user,
 };
-use crate::db::db;
+use crate::db::{Db, DbError, RowExt, db, id_param};
 
 /// How long a reset link works.
 pub const RESET_LIFETIME: Duration = Duration::from_secs(60 * 60);
@@ -40,23 +42,54 @@ pub fn now() -> i64 {
         })
 }
 
-/// A live reset token: who it is for and when it stops working. The token itself is never
-/// stored, only its hash.
-#[derive(Debug, toasty::Model)]
+/// A live reset token: who it is for and when it stops working (a row of
+/// `dbo.password_resets`). The token itself is never stored, only its hash.
+#[derive(Debug, Clone)]
 pub struct PasswordReset {
-    #[key]
-    #[auto]
-    pub id: u64,
-
-    #[index]
     pub user_id: u64,
 
-    /// SHA-256 of the token.
-    #[unique]
+    /// SHA-256 of the token (unique). Only tests look at it.
+    #[cfg(test)]
     pub token_hash: Vec<u8>,
 
     /// Seconds since the Unix epoch.
     pub expires_at: i64,
+}
+
+impl PasswordReset {
+    fn from_row(row: &Row) -> Result<Self, DbError> {
+        Ok(Self {
+            user_id: row.id("user_id")?,
+            #[cfg(test)]
+            token_hash: row.req("token_hash")?,
+            expires_at: row.req("expires_at")?,
+        })
+    }
+
+    /// The record with this token hash, expired or not.
+    async fn find_by_token_hash(db: &Db, token_hash: &[u8]) -> Result<Option<Self>, DbError> {
+        db.query_one(
+            "SELECT user_id, token_hash, expires_at FROM dbo.password_resets              WHERE token_hash = @P1",
+            &[&token_hash],
+        )
+        .await?
+        .as_ref()
+        .map(Self::from_row)
+        .transpose()
+    }
+
+    /// Every record, oldest first.
+    #[cfg(test)]
+    pub async fn all(db: &Db) -> Result<Vec<Self>, DbError> {
+        db.query(
+            "SELECT user_id, token_hash, expires_at FROM dbo.password_resets ORDER BY id",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(Self::from_row)
+        .collect()
+    }
 }
 
 /// Why a reset was refused.
@@ -132,21 +165,20 @@ fn digest(token: &str) -> Vec<u8> {
 /// Makes a reset token for the user, valid from `now` (Unix seconds) for
 /// [`RESET_LIFETIME`], and returns it. This is the only time the token exists in the clear.
 /// Any earlier token for the same user stops working.
-pub async fn issue(db: &mut toasty::Db, user_id: u64, now: i64) -> Result<String> {
+pub async fn issue(db: &Db, user_id: u64, now: i64) -> Result<String> {
     let token = new_token();
     let expires_at = now.saturating_add(i64::try_from(RESET_LIFETIME.as_secs()).unwrap_or(3600));
 
-    let mut tx = db.transaction().await?;
-    PasswordReset::filter_by_user_id(user_id)
-        .delete()
-        .exec(&mut tx)
-        .await?;
-    toasty::create!(PasswordReset {
-        user_id,
-        token_hash: digest(&token),
-        expires_at,
-    })
-    .exec(&mut tx)
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "DELETE FROM dbo.password_resets WHERE user_id = @P1",
+        &[&id_param(user_id)],
+    )
+    .await?;
+    tx.execute(
+        "INSERT INTO dbo.password_resets (user_id, token_hash, expires_at) VALUES (@P1, @P2, @P3)",
+        &[&id_param(user_id), &digest(&token), &expires_at],
+    )
     .await?;
     tx.commit().await?;
     Ok(token)
@@ -154,14 +186,11 @@ pub async fn issue(db: &mut toasty::Db, user_id: u64, now: i64) -> Result<String
 
 /// The live token record this text stands for, if it is well formed, known and has not
 /// expired by `now` (Unix seconds).
-pub async fn find_valid(db: &mut toasty::Db, raw: &str, now: i64) -> Result<Option<PasswordReset>> {
+pub async fn find_valid(db: &Db, raw: &str, now: i64) -> Result<Option<PasswordReset>> {
     let Some(token) = clean_token(raw) else {
         return Ok(None);
     };
-    let found = PasswordReset::filter_by_token_hash(digest(&token))
-        .first()
-        .exec(db)
-        .await?;
+    let found = PasswordReset::find_by_token_hash(db, &digest(&token)).await?;
     Ok(found.filter(|reset| reset.expires_at > now))
 }
 
@@ -173,7 +202,7 @@ pub async fn find_valid(db: &mut toasty::Db, raw: &str, now: i64) -> Result<Opti
 /// the old password is signed out). Nobody is logged in by this: the person signs in with the
 /// new password. A password that is refused leaves the token intact, so they can try again.
 pub async fn redeem(
-    db: &mut toasty::Db,
+    db: &Db,
     raw: &str,
     new_password: &str,
     now: i64,
@@ -189,38 +218,43 @@ pub async fn redeem(
     }
     let new_hash = user::hash_new_password(new_password).await?;
 
-    let mut tx = db.transaction().await?;
+    let mut tx = db.begin().await?;
     // Checked again inside the transaction, so two people using one link at once cannot both
-    // succeed. Returning early drops the transaction, which rolls it back.
-    let Some(reset) = PasswordReset::filter_by_token_hash(digest(&token))
-        .first()
-        .exec(&mut tx)
+    // succeed: the first locks the row until it commits, and the second then finds it gone.
+    // Returning early drops the transaction, which rolls it back.
+    let Some(reset) = tx
+        .query_one(
+            "SELECT user_id, token_hash, expires_at FROM dbo.password_resets WITH (UPDLOCK, HOLDLOCK)              WHERE token_hash = @P1",
+            &[&digest(&token)],
+        )
         .await?
+        .as_ref()
+        .map(PasswordReset::from_row)
+        .transpose()?
         .filter(|reset| reset.expires_at > now)
     else {
         return Ok(Err(ResetError::InvalidLink));
     };
-    let Some(mut account) = User::filter_by_id(reset.user_id)
-        .first()
-        .exec(&mut tx)
-        .await?
-    else {
+    let updated = tx
+        .execute(
+            "UPDATE dbo.users SET password_hash = @P1 WHERE id = @P2",
+            &[&new_hash, &id_param(reset.user_id)],
+        )
+        .await?;
+    if updated == 0 {
+        // The account is gone.
         return Ok(Err(ResetError::InvalidLink));
-    };
-
-    account
-        .update()
-        .password_hash(new_hash.as_str())
-        .exec(&mut tx)
-        .await?;
-    PasswordReset::filter_by_user_id(reset.user_id)
-        .delete()
-        .exec(&mut tx)
-        .await?;
-    SessionRecord::filter_by_user_id(reset.user_id)
-        .delete()
-        .exec(&mut tx)
-        .await?;
+    }
+    tx.execute(
+        "DELETE FROM dbo.password_resets WHERE user_id = @P1",
+        &[&id_param(reset.user_id)],
+    )
+    .await?;
+    tx.execute(
+        "DELETE FROM dbo.session_records WHERE user_id = @P1",
+        &[&id_param(reset.user_id)],
+    )
+    .await?;
     tx.commit().await?;
     Ok(Ok(()))
 }
@@ -244,8 +278,8 @@ pub async fn redeem_for_request(
         return Ok(Err(ResetError::Throttled));
     }
 
-    let mut handle = db(cx);
-    if find_valid(&mut handle, raw, now).await?.is_none() {
+    let handle = db(cx);
+    if find_valid(&handle, raw, now).await?.is_none() {
         throttle.record(&key, BAD_LINKS_PER_NETWORK, Instant::now());
         return Ok(Err(ResetError::InvalidLink));
     }
@@ -253,7 +287,7 @@ pub async fn redeem_for_request(
         return Ok(Err(ResetError::Mismatch));
     }
 
-    let outcome = redeem(&mut handle, raw, new_password, now).await?;
+    let outcome = redeem(&handle, raw, new_password, now).await?;
     if outcome == Err(ResetError::InvalidLink) {
         throttle.record(&key, BAD_LINKS_PER_NETWORK, Instant::now());
     }
@@ -262,11 +296,12 @@ pub async fn redeem_for_request(
 
 /// Deletes every reset token that has expired by `now` (Unix seconds). Expired tokens
 /// already do nothing; this only keeps the table from growing.
-pub async fn purge_expired(db: &mut toasty::Db, now: i64) -> Result<()> {
-    PasswordReset::filter(PasswordReset::fields().expires_at().le(now))
-        .delete()
-        .exec(db)
-        .await?;
+pub async fn purge_expired(db: &Db, now: i64) -> Result<()> {
+    db.execute(
+        "DELETE FROM dbo.password_resets WHERE expires_at <= @P1",
+        &[&now],
+    )
+    .await?;
     Ok(())
 }
 
@@ -274,7 +309,7 @@ pub async fn purge_expired(db: &mut toasty::Db, now: i64) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::db;
-    use crate::features::user::{create_account, verify_current_password};
+    use crate::features::user::{SessionRecord, User, create_account, verify_current_password};
     use topcoat::context::Cx;
 
     const OLD: &str = "the old password 123";
@@ -282,37 +317,32 @@ mod tests {
     const NOW: i64 = 1_000_000;
 
     async fn account(cx: &Cx, email: &str) -> User {
-        create_account(&mut db(cx), email, OLD)
+        create_account(&db(cx), email, OLD)
             .await
             .unwrap()
             .expect("account created")
     }
 
     async fn live_tokens(cx: &Cx, user_id: u64) -> usize {
-        PasswordReset::filter_by_user_id(user_id)
-            .exec(&mut db(cx))
+        PasswordReset::all(&db(cx))
             .await
             .unwrap()
-            .len()
+            .iter()
+            .filter(|reset| reset.user_id == user_id)
+            .count()
     }
 
     async fn sessions(cx: &Cx, user_id: u64) -> usize {
-        SessionRecord::filter_by_user_id(user_id)
-            .exec(&mut db(cx))
+        SessionRecord::for_user(&db(cx), user_id)
             .await
             .unwrap()
             .len()
     }
 
     async fn add_session(cx: &Cx, user_id: u64, marker: u8) {
-        toasty::create!(SessionRecord {
-            token_hash: vec![marker; 32],
-            user_id,
-            expires_at: 9_999_999_999i64,
-        })
-        .exec(&mut db(cx))
-        .await
-        .unwrap();
+        SessionRecord::create(&db(cx), &[marker; 32], user_id, 9_999_999_999i64)
+            .await
+            .unwrap();
     }
 
     /// Whether `password` is now the account's password.
@@ -329,7 +359,7 @@ mod tests {
         password: &str,
         now: i64,
     ) -> std::result::Result<(), ResetError> {
-        redeem(&mut db(cx), token, password, now)
+        redeem(&db(cx), token, password, now)
             .await
             .expect("no internal error")
     }
@@ -388,13 +418,8 @@ mod tests {
     async fn a_new_token_works_once_and_sets_the_password() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
-        assert!(
-            find_valid(&mut db(&cx), &token, NOW)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
+        assert!(find_valid(&db(&cx), &token, NOW).await.unwrap().is_some());
 
         assert_eq!(redeem_at(&cx, &token, NEW, NOW).await, Ok(()));
         assert!(
@@ -419,9 +444,9 @@ mod tests {
     async fn the_raw_token_is_never_stored() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
 
-        let stored = PasswordReset::all().exec(&mut db(&cx)).await.unwrap();
+        let stored = PasswordReset::all(&db(&cx)).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_ne!(stored[0].token_hash, token.as_bytes());
         assert_ne!(stored[0].token_hash, hex_bytes(&token));
@@ -432,17 +457,17 @@ mod tests {
     async fn a_link_stops_working_exactly_when_it_expires() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
         let lifetime = i64::try_from(RESET_LIFETIME.as_secs()).unwrap();
 
         assert!(
-            find_valid(&mut db(&cx), &token, NOW + lifetime - 1)
+            find_valid(&db(&cx), &token, NOW + lifetime - 1)
                 .await
                 .unwrap()
                 .is_some()
         );
         assert!(
-            find_valid(&mut db(&cx), &token, NOW + lifetime)
+            find_valid(&db(&cx), &token, NOW + lifetime)
                 .await
                 .unwrap()
                 .is_none()
@@ -461,8 +486,8 @@ mod tests {
     async fn making_a_new_link_cancels_the_old_one() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let first = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
-        let second = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let first = issue(&db(&cx), alice.id, NOW).await.unwrap();
+        let second = issue(&db(&cx), alice.id, NOW).await.unwrap();
         assert_ne!(first, second);
         assert_eq!(
             live_tokens(&cx, alice.id).await,
@@ -485,8 +510,8 @@ mod tests {
         add_session(&cx, alice.id, 1).await;
         add_session(&cx, alice.id, 2).await;
         add_session(&cx, bob.id, 3).await;
-        let bobs_token = issue(&mut db(&cx), bob.id, NOW).await.unwrap();
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let bobs_token = issue(&db(&cx), bob.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
 
         assert_eq!(redeem_at(&cx, &token, NEW, NOW).await, Ok(()));
         assert_eq!(
@@ -498,7 +523,7 @@ mod tests {
         assert_eq!(live_tokens(&cx, bob.id).await, 1, "and so is his link");
         assert!(password_is(&cx, bob.id, OLD).await, "and his password");
         assert!(
-            find_valid(&mut db(&cx), &bobs_token, NOW)
+            find_valid(&db(&cx), &bobs_token, NOW)
                 .await
                 .unwrap()
                 .is_some()
@@ -510,7 +535,7 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
         add_session(&cx, alice.id, 1).await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
 
         for weak in ["short", "", &"x".repeat(129)] {
             assert_eq!(
@@ -531,7 +556,7 @@ mod tests {
     async fn a_wrong_or_malformed_token_gets_the_same_answer_as_an_expired_one() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let _token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let _token = issue(&db(&cx), alice.id, NOW).await.unwrap();
         for bad in ["", "nonsense", &"0".repeat(64), &"f".repeat(64)] {
             assert_eq!(
                 redeem_at(&cx, bad, NEW, NOW).await,
@@ -545,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_for_an_account_that_no_longer_exists_does_nothing() {
         let cx = crate::db::test_cx().await;
-        let ghost = issue(&mut db(&cx), 424_242, NOW).await.unwrap();
+        let ghost = issue(&db(&cx), 424_242, NOW).await.unwrap();
         assert_eq!(
             redeem_at(&cx, &ghost, NEW, NOW).await,
             Err(ResetError::InvalidLink)
@@ -557,11 +582,11 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
         let bob = account(&cx, "bob@example.com").await;
-        issue(&mut db(&cx), alice.id, NOW).await.unwrap();
-        issue(&mut db(&cx), bob.id, NOW + 10_000).await.unwrap();
+        issue(&db(&cx), alice.id, NOW).await.unwrap();
+        issue(&db(&cx), bob.id, NOW + 10_000).await.unwrap();
 
         let lifetime = i64::try_from(RESET_LIFETIME.as_secs()).unwrap();
-        purge_expired(&mut db(&cx), NOW + lifetime).await.unwrap();
+        purge_expired(&db(&cx), NOW + lifetime).await.unwrap();
         assert_eq!(live_tokens(&cx, alice.id).await, 0, "hers had expired");
         assert_eq!(live_tokens(&cx, bob.id).await, 1, "his is still live");
     }
@@ -581,7 +606,7 @@ mod tests {
     async fn a_wrong_link_reads_as_wrong_whatever_else_was_typed() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        issue(&db(&cx), alice.id, NOW).await.unwrap();
         // Mismatching passwords with a bad link: told the link is bad, nothing about the passwords.
         assert_eq!(
             via_request(&cx, &"a".repeat(64), NEW, "something else").await,
@@ -597,7 +622,7 @@ mod tests {
     async fn a_mismatch_is_reported_to_a_valid_link_and_leaves_it_usable() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
         for _ in 0..25 {
             assert_eq!(
                 via_request(&cx, &token, NEW, "different").await,
@@ -613,7 +638,7 @@ mod tests {
     async fn too_many_bad_links_from_one_network_are_refused_even_a_good_one() {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
-        let token = issue(&mut db(&cx), alice.id, NOW).await.unwrap();
+        let token = issue(&db(&cx), alice.id, NOW).await.unwrap();
 
         for attempt in 1..=BAD_LINKS_PER_NETWORK.max {
             assert_eq!(

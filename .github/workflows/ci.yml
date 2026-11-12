@@ -18,6 +18,22 @@ jobs:
     defaults:
       run:
         working-directory: todo-app
+    # The tests run against a real SQL Server. The password is the app's local-development
+    # default (src/config.rs), so no further configuration is needed.
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ToDoApp-Dev-Passw0rd
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ToDoApp-Dev-Passw0rd -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 20s
     steps:
       - uses: actions/checkout@v7
 

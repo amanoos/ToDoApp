@@ -5,6 +5,49 @@ whether Topcoat fits their next project. Versions: Topcoat 0.12, Toasty 0.11, Ru
 Windows. Topcoat moved from 0.10 to 0.12 while this was being built, so treat anything here as
 a snapshot.
 
+> **Update, 2026-11-12: the app moved from Toasty + SQLite to SQL Server.** Everything below that
+> mentions Toasty, SQLite or in-memory test databases describes the earlier version. The move
+> itself taught a few things, listed in the next section.
+
+## Moving to SQL Server with mssql-rs
+
+The request was SQL Server through Microsoft's `mssql-rs`. What that involved:
+
+- **Toasty has no SQL Server driver** (it supports SQLite, Turso, PostgreSQL, MySQL and DynamoDB),
+  so the ORM went and the data layer became hand-written T-SQL. That was about a dozen query
+  sites, each short, plus the tests; the public functions the pages call did not change, and the
+  existing tests exercise them unchanged. Net effect on the code: more SQL, less magic, no
+  generated method names to collide with (see rough edge 1 below).
+- **`mssql-rs` is a protocol library, not an ORM or a pool.** Its crate is `mssql-tds` (on
+  crates.io, 0.4 at the time). The crate named `mssql-rs` on crates.io is a placeholder. The
+  `mssql-tds` README documents connecting and reading rows but not parameterized queries,
+  transactions or pooling, so the app uses `mssql-tiberius-bridge`, a community wrapper that sits
+  on `mssql-tds` and adds `@P1, @P2` parameters, rows with typed getters and a `deadpool` pool.
+  Transactions are plain `BEGIN`/`COMMIT` on one pooled connection.
+- **The compiler needed a bigger recursion limit.** Proving each page's future is `Send` through
+  the driver's deeply nested async calls overflowed the default (`error[E0275]`); the compiler
+  itself suggests the fix, `#![recursion_limit = "512"]`.
+- **`localhost` can mean IPv6.** Against a container published on `127.0.0.1` only, connecting
+  to `localhost` timed out (the tests failed with `Timeout while connecting`). Switching the
+  default URL to `127.0.0.1` fixed it; resolving to `::1` first is the likely cause, but that was
+  not confirmed.
+- **T-SQL differences that bit:** `EXEC` takes a variable, not an expression (`EXEC('...' +
+  QUOTENAME(@name))` is a syntax error); `BIT` columns cannot be used in arithmetic (`1 - done`
+  is invalid, use `CASE`); `NVARCHAR` lengths count UTF-16 code units, so a 200-character title
+  that is all emoji needs 400; ids are `BIGINT`, so the app's `u64` ids convert at the edge.
+- **Tests got heavier but more honest.** 166 tests, most against a live server, take about 26
+  seconds. Each database test creates its own throwaway database and drops it afterwards, so they
+  run in parallel with empty tables. The tests that used to run on in-memory SQLite now need
+  Docker; CI starts a SQL Server service container for them.
+- **A transaction that is dropped must not go back to the pool open.** The pool resets a
+  connection when it is next borrowed, not when it is returned, so a transaction abandoned by an
+  early `return` would hold its locks until then. The app detaches such a connection from the
+  pool instead, which closes it and lets the server roll back at once. A test covers it.
+- **The image is heavier at runtime.** The driver uses the system's OpenSSL, so the slim runtime
+  image installs `libssl3` and CA certificates; the SQL Server image itself is about 2.2 GB on disk and
+  wants about 2 GB of memory. The Developer edition is not licensed for production, so the
+  production compose file defaults to Express.
+
 ## What worked well
 
 - **One language, no WebAssembly.** Pages, data access, validation and the interactive bits are

@@ -1,3 +1,7 @@
+// The SQL Server driver's futures nest deeply, and proving each page's future is `Send`
+// (which the server requires) needs more than the default depth.
+#![recursion_limit = "512"]
+
 mod app;
 mod components;
 mod config;
@@ -15,7 +19,7 @@ use std::{
 /// the first account is made on a site with sign-ups closed. The password is read from
 /// standard input, never from the command line, where it would show up in process listings
 /// and shell history. Returns the process exit code.
-async fn create_user(db: &mut toasty::Db, mut args: impl Iterator<Item = String>) -> i32 {
+async fn create_user(db: &db::Db, mut args: impl Iterator<Item = String>) -> i32 {
     args.next(); // the subcommand's own name
     let (Some(email), None) = (args.next(), args.next()) else {
         eprintln!(
@@ -57,7 +61,7 @@ async fn create_user(db: &mut toasty::Db, mut args: impl Iterator<Item = String>
 /// `todo-app delete-user <email> [--yes]`: deletes an account and everything it owns (todos,
 /// lists, sessions), for the operator of a site where people cannot do it themselves. Without
 /// `--yes` nothing is deleted: it only says what would be. Returns the process exit code.
-async fn delete_user(db: &mut toasty::Db, args: impl Iterator<Item = String>) -> i32 {
+async fn delete_user(db: &db::Db, args: impl Iterator<Item = String>) -> i32 {
     use features::{account, user::User, user::normalize_email};
 
     let usage = "usage: todo-app delete-user <email> [--yes]";
@@ -78,7 +82,7 @@ async fn delete_user(db: &mut toasty::Db, args: impl Iterator<Item = String>) ->
     };
 
     let found = match normalize_email(&email) {
-        Some(email) => User::filter_by_email(&email).first().exec(&mut *db).await,
+        Some(email) => User::find_by_email(db, &email).await,
         None => Ok(None),
     };
     let user = match found {
@@ -127,7 +131,7 @@ async fn delete_user(db: &mut toasty::Db, args: impl Iterator<Item = String>) ->
 /// for an hour, and a newer link for the same account cancels it. It carries a secret, so
 /// treat it like a password. Returns the process exit code.
 async fn reset_link(
-    db: &mut toasty::Db,
+    db: &db::Db,
     public_url: Option<&str>,
     mut args: impl Iterator<Item = String>,
 ) -> i32 {
@@ -143,7 +147,7 @@ async fn reset_link(
     };
 
     let found = match normalize_email(&email) {
-        Some(email) => User::filter_by_email(&email).first().exec(&mut *db).await,
+        Some(email) => User::find_by_email(db, &email).await,
         None => Ok(None),
     };
     let user = match found {
@@ -235,21 +239,12 @@ async fn main() {
         exit(2);
     });
 
-    let mut db = db::connect(&config.database_url)
+    let db = db::connect(&config.database_url)
         .await
         .unwrap_or_else(|error| {
             eprintln!("cannot open the database: {error}");
             exit(1);
         });
-
-    // `cargo run -- toasty migration <command>` manages the database schema.
-    if args.peek().is_some_and(|arg| arg == "toasty") {
-        if let Err(error) = toasty_cli::ToastyCli::new(db).parse_from(args).await {
-            eprintln!("{error:#}");
-            exit(1);
-        }
-        return;
-    }
 
     if config.migrate_on_start {
         match db::migrate(&db).await {
@@ -264,14 +259,14 @@ async fn main() {
 
     // Runs after the migrations, so it also works against a brand-new database.
     if args.peek().is_some_and(|arg| arg == "create-user") {
-        exit(create_user(&mut db, args).await);
+        exit(create_user(&db, args).await);
     }
 
     if args.peek().is_some_and(|arg| arg == "delete-user") {
-        exit(delete_user(&mut db, args).await);
+        exit(delete_user(&db, args).await);
     }
     if args.peek().is_some_and(|arg| arg == "reset-link") {
-        exit(reset_link(&mut db, config.public_url.as_deref(), args).await);
+        exit(reset_link(&db, config.public_url.as_deref(), args).await);
     }
 
     // Email is optional; when it is configured, a mistake is better found now than when

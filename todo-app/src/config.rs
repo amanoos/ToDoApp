@@ -7,7 +7,7 @@
 //!
 //! | Variable | Default | Meaning |
 //! | --- | --- | --- |
-//! | `DATABASE_URL` | `sqlite:data.db` | SQLite database, e.g. `sqlite:/data/app.db` |
+//! | `DATABASE_URL` | the local dev container | SQL Server, e.g. `sqlserver://sa:pw@db:1433/todoapp` |
 //! | `MIGRATE_ON_START` | `true` | apply pending database migrations at startup |
 //! | `REGISTRATION` | `open` | who may sign up: `open`, `closed` or `first-user` |
 //! | `PUBLIC_URL` | none | the site's public address, for full links in the command line tools |
@@ -21,8 +21,11 @@
 
 use std::{fmt, net::IpAddr};
 
-/// Where the database lives when `DATABASE_URL` is not set.
-pub const DEFAULT_DATABASE_URL: &str = "sqlite:data.db";
+/// Where the database lives when `DATABASE_URL` is not set: the throwaway SQL Server
+/// container that `docker-compose.dev.yml` starts on this machine. Its password is public on
+/// purpose; the container only listens on 127.0.0.1. Never rely on this default in production.
+pub const DEFAULT_DATABASE_URL: &str =
+    "sqlserver://sa:ToDoApp-Dev-Passw0rd@127.0.0.1:1433/todoapp?trust_server_certificate=true";
 
 /// The most reverse-proxy hops accepted; more than a handful is a mistake.
 const MAX_PROXY_HOPS: usize = 8;
@@ -214,12 +217,9 @@ impl Config {
         let database_url = get("DATABASE_URL")
             .map(|url| url.trim().to_owned())
             .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_owned());
-        if !database_url.starts_with("sqlite:") {
-            // The value is not echoed: a URL for another database may contain a password.
-            return Err(ConfigError::new(
-                "DATABASE_URL",
-                "only SQLite is supported, so it must start with \"sqlite:\"",
-            ));
+        // The value is not echoed: it holds a password.
+        if let Err(problem) = crate::db::Target::parse(&database_url) {
+            return Err(ConfigError::new("DATABASE_URL", problem));
         }
 
         let migrate_on_start = match get("MIGRATE_ON_START") {
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(
             config(&[]).unwrap(),
             Config {
-                database_url: "sqlite:data.db".to_owned(),
+                database_url: DEFAULT_DATABASE_URL.to_owned(),
                 migrate_on_start: true,
                 registration: Registration::Open,
                 public_url: None,
@@ -390,19 +390,22 @@ mod tests {
     }
 
     #[test]
-    fn a_database_path_is_taken_as_given_and_only_sqlite_is_accepted() {
+    fn a_database_url_is_taken_as_given_and_only_sql_server_is_accepted() {
+        let url = "sqlserver://sa:secret@db:1433/todoapp";
         assert_eq!(
-            config(&[("DATABASE_URL", " sqlite:/data/app.db ")])
+            config(&[("DATABASE_URL", &format!(" {url} "))])
                 .unwrap()
                 .database_url,
-            "sqlite:/data/app.db"
+            url
         );
         for bad in [
             "postgres://u:p@h/db",
             "mysql://h/db",
+            "sqlite:/data/app.db",
             "/data/app.db",
             "data.db",
-            "SQLITE:x",
+            "SQLSERVER://sa:secret@db/todoapp",
+            "sqlserver://db/todoapp",
         ] {
             assert!(
                 error(&[("DATABASE_URL", bad)]).starts_with("DATABASE_URL:"),
@@ -413,8 +416,14 @@ mod tests {
 
     #[test]
     fn the_error_does_not_echo_a_database_url_that_may_hold_a_password() {
-        let message = error(&[("DATABASE_URL", "postgres://user:hunter2@host/db")]);
-        assert!(!message.contains("hunter2"), "{message}");
+        for bad in [
+            "postgres://user:hunter2@host/db",
+            "sqlserver://user:hunter2@host:notaport/db",
+            "sqlserver://user:hunter2@host",
+        ] {
+            let message = error(&[("DATABASE_URL", bad)]);
+            assert!(!message.contains("hunter2"), "{message}");
+        }
     }
 
     #[test]

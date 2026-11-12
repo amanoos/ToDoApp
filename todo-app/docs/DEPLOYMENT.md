@@ -9,8 +9,14 @@ host); the few things that were not are marked **untested**.
 - **The app needs HTTPS** (except on `localhost`). The login cookie is `__Host-`-prefixed and
   `Secure`, so a browser will not store or send it over plain HTTP from any other host, and
   logging in appears to do nothing. The compose setup below gets certificates automatically.
-- **Run one instance.** The login rate limiter lives in memory and the database is a single
-  SQLite file, so two copies would each have their own limits and could not share a database.
+- **Run one app instance.** The login rate limiter lives in memory, so two copies would each have
+  their own limits. (They could share the SQL Server database; only the limiter is per instance.)
+- **The database is SQL Server, in its own container.** The compose file starts one, with a
+  password you choose (`MSSQL_SA_PASSWORD`). SQL Server needs about 2 GB of memory and its image
+  is about 2.2 GB on disk. The compose file accepts Microsoft's license terms for you (`ACCEPT_EULA=Y`;
+  read them) and runs the free **Express** edition (10 GB database limit), which is allowed in
+  production. The Developer edition used by `docker-compose.dev.yml` is **not licensed for
+  production**; set `MSSQL_PID` in `.env` if you hold a license for another edition.
 - **Sign-ups are a deployment decision.** The app itself defaults to `REGISTRATION=open`
   (anyone who can reach it can create an account), but the compose file sets `closed`: nobody
   can sign up on the website, and you create accounts from the command line (see "Accounts and
@@ -26,9 +32,14 @@ You need Docker with Compose, and for a real domain: DNS pointing at the server 
 and 443 open (Caddy uses them to obtain certificates).
 
 ```sh
-cp .env.example .env          # then set SITE_ADDRESS=todo.example.com
+cp .env.example .env          # then set MSSQL_SA_PASSWORD and SITE_ADDRESS=todo.example.com
 docker compose up -d --build
 ```
+
+`MSSQL_SA_PASSWORD` is required (compose refuses to start without it) and SQL Server rejects weak
+ones: at least 8 characters, from three of upper case, lower case, digits and symbols. Use letters
+and digits if you can: the password is also placed in the app's `DATABASE_URL`, where special
+characters would need percent-encoding.
 
 Then create your account (sign-ups are closed by default; the password is read from standard
 input, so it never appears in process listings or shell history):
@@ -41,11 +52,12 @@ printf '%s\n' "a long password, 12 to 128 characters" \
 For a local trial leave `SITE_ADDRESS=localhost` and open <https://localhost>; your browser will
 warn about the certificate because Caddy issues it from its own local authority.
 
-This starts two containers:
+This starts three containers:
 
 | Service | What it is |
 | --- | --- |
-| `app` | The Rust app, built from the [Dockerfile](../Dockerfile) (about 140 MB). Runs as an unprivileged user on a read-only filesystem with all Linux capabilities dropped. Its port is **not** published; only the proxy can reach it. |
+| `db` | Microsoft SQL Server 2022 (`mcr.microsoft.com/mssql/server`), the app's database, with its data in the `db-data` volume. Its port is **not** published; only the app can reach it, on the compose network. |
+| `app` | The Rust app, built from the [Dockerfile](../Dockerfile). Starts once the database is healthy, creates the `todoapp` database if it is missing, and applies migrations. Runs as an unprivileged user on a read-only filesystem with all Linux capabilities dropped, and keeps nothing on its own disk. Its port is **not** published; only the proxy can reach it. |
 | `proxy` | [Caddy](https://caddyserver.com/): terminates HTTPS, redirects HTTP to HTTPS (308), compresses responses and forwards to the app. |
 
 The first build takes a few minutes (it compiles in release mode and downloads the Tailwind CLI
@@ -53,26 +65,37 @@ and the font files). It needs network access. Later builds reuse the cache.
 
 ### What was verified
 
-- The container becomes healthy in about 8 seconds, applying the database migrations on first
-  start (`applied 4 database migration(s)`), and does not re-apply them on restart.
-- `docker stop` ends it in under a second with exit code 0 (the app handles `SIGTERM`).
-- Data survives a restart; a backup and restore round-trips (below).
-- Through the proxy: the security headers (including HSTS) reach the browser, the session
-  cookie is `Secure`, and `/healthz` answers.
-- A spoofed `X-Forwarded-For` does not dodge the login rate limit (see "Behind a reverse
-  proxy").
+With SQL Server, on Docker 29 / Windows (the full compose stack, built from this repository):
+
+- SQL Server became healthy about 40 seconds after `docker compose up`; the app, which waits for
+  it, was healthy about 25 seconds after that. On its first start the app created the `todoapp`
+  database and applied the one migration (`applied 1 database migration(s)`).
+- Through the proxy over HTTPS: `/healthz` answers `ok`, and logging in redirects to `/todos`,
+  which loads with the `__Host-` session cookie.
+- `create-user`, `reset-link` and the `delete-user` preview work inside the app container.
+- A backup taken while the app was running, and a restore of it, round-trip (below): a user
+  created after the backup was gone after the restore, the others were intact, and the app was
+  healthy again.
+- The whole test suite (166 tests, most of them against a real SQL Server) passes, and CI runs it
+  against a SQL Server service container.
+
+Verified earlier, before the move to SQL Server (these do not touch the database, but were not
+repeated afterwards): `docker stop` ends the app in under a second with exit code 0 (it handles
+`SIGTERM`); the security headers (including HSTS) reach the browser; and a spoofed
+`X-Forwarded-For` does not dodge the login rate limit (see "Behind a reverse proxy").
 
 ## Configuration
 
-All settings are environment variables and all are optional. Mistakes (a typo in a flag, a bad
-network, a non-SQLite database URL) stop the app at startup with exit code 2 and a message that
+All settings are environment variables and all are optional. (The compose file additionally
+requires `MSSQL_SA_PASSWORD`, which configures the database container.) Mistakes (a typo in a
+flag, a bad network, a malformed database URL) stop the app at startup with exit code 2 and a message that
 names the variable; the database URL is never echoed back, since it could hold a password.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` (image: `0.0.0.0`) | Address to listen on. |
 | `PORT` | `3000` | Port to listen on. |
-| `DATABASE_URL` | `sqlite:data.db` (image: `sqlite:/data/app.db`) | The SQLite database. Only SQLite is supported. |
+| `DATABASE_URL` | the local dev container: `sqlserver://sa:...@127.0.0.1:1433/todoapp?trust_server_certificate=true` (compose sets its own) | The SQL Server database: `sqlserver://user:password@host:1433/database`. Options: `trust_server_certificate=true` accepts a self-signed certificate (the SQL Server container has one), `encrypt=true` (the default), `false` or `strict`. Percent-encode special characters in the user, password and database name. If the database does not exist, the app creates it (the login needs permission to). Contains a password: never printed. Only SQL Server is supported. |
 | `MIGRATE_ON_START` | `true` | Apply pending database migrations at startup. Set `false` only if you run migrations another way. |
 | `REGISTRATION` | `open` (compose: `closed`) | Who may sign up on the website: `open`, `closed` or `first-user`. See "Accounts and sign-ups". |
 | `PUBLIC_URL` | none | The site's public address, for example `https://todo.example.com` (scheme and host, no path). Used to write complete links: by `reset-link`, and in emailed reset links (it is the only source of the address in those, never the request's `Host` header). Anything with a path or odd characters stops the app at startup. |
@@ -299,38 +322,45 @@ docker compose logs app
 
 ## Data and backups
 
-The database is one SQLite file, `/data/app.db`, in the `app-data` volume (named
-`<project>_app-data`, for example `todo-app_app-data`). It is a single file with no write-ahead
-log files alongside it.
+Everything the app stores is in the `todoapp` database, which lives in the `db-data` volume of
+the `db` container (named `<project>_db-data`, for example `todo-app_db-data`). Do not back it up
+by copying the volume's files while SQL Server is running; use SQL Server's own `BACKUP DATABASE`,
+which is consistent and **works while the app keeps running**.
 
-**Back up** by stopping the app briefly (it was back to healthy within about eight seconds in
-testing), copying the file, and starting it again. A copy taken while the app is writing is not guaranteed to be consistent, so
-do not skip the stop.
+The commands below send the SQL to `sqlcmd` on standard input, and the container's own shell
+supplies the password (`$MSSQL_SA_PASSWORD`), so nothing secret appears in your command line. They
+were run exactly like this against the compose stack. On Windows with Git Bash, put
+`MSYS_NO_PATHCONV=1` in front of them (or export it), or Git Bash rewrites the `/var/...` paths.
+
+**Back up:**
 
 ```sh
-VOL=todo-app_app-data
 mkdir -p backup
-docker compose stop app
-docker run --rm -v $VOL:/data:ro -v "$PWD/backup":/backup debian:bookworm-slim \
-  cp /data/app.db /backup/app-$(date +%F).db
-docker compose start app
+echo "BACKUP DATABASE [todoapp] TO DISK = N'/var/opt/mssql/data/todoapp.bak' WITH INIT, COMPRESSION, CHECKSUM" \
+  | docker compose exec -T db sh -c '/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b'
+docker compose cp db:/var/opt/mssql/data/todoapp.bak backup/todoapp-$(date +%F).bak
 ```
 
-Check a backup by opening it read-only and running `pragma integrity_check` (it should print
-`ok`).
+The first command writes the backup inside the container (`WITH INIT` makes each backup replace
+the last one there) and prints `BACKUP DATABASE successfully processed ...`; the second copies it
+out to your machine. `CHECKSUM` makes SQL Server verify page checksums as it reads them. Check a
+copy later with `RESTORE VERIFYONLY FROM DISK = ...`.
 
-**Restore** by putting the file back with the right owner (the app runs as user 10001):
+**Restore** (this replaces the current database with the backup's contents, so everything
+changed since is lost; stop the app first so nothing is using it):
 
 ```sh
 docker compose stop app
-docker run --rm -v $VOL:/data -v "$PWD/backup":/backup:ro debian:bookworm-slim \
-  sh -c 'cp /backup/app-2026-11-09.db /data/app.db && chown 10001:999 /data/app.db'
+docker compose cp backup/todoapp-2026-11-12.bak db:/var/opt/mssql/data/restore.bak
+echo "ALTER DATABASE [todoapp] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; RESTORE DATABASE [todoapp] FROM DISK = N'/var/opt/mssql/data/restore.bak' WITH REPLACE; ALTER DATABASE [todoapp] SET MULTI_USER;" \
+  | docker compose exec -T db sh -c '/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b'
 docker compose start app
 ```
 
-Tried end to end: after restoring, a user created *after* the backup was gone and a user created
-*before* it could still log in. Sessions are stored in the database too, so a restore also
-restores who was logged in at the time of the backup.
+Tried end to end: after restoring, a user created *after* the backup was gone, the users created
+before it were back, and the app was healthy again. Sessions are stored in the database too, so a
+restore also restores who was logged in at the time of the backup. The restored copy
+(`restore.bak`) stays in the container's data folder until you delete it.
 
 Schedule the backup commands with cron or your platform's scheduler, and copy the files off the
 machine. Anything that is not copied elsewhere is not a backup.
@@ -347,9 +377,11 @@ The new container applies any new migrations when it starts, and `docker compose
 `applied N database migration(s)`. Migrations only go forward, so to roll back, restore the
 backup **and** run the previous version of the code.
 
-If a migration fails the app exits with `database migration failed` and the error. That path was
-not exercised here, so do not assume a half-applied migration rolls back cleanly: restore the
-backup you took before upgrading.
+If a migration fails the app exits with `database migration failed` and the error. All pending
+migrations run in one transaction under a lock, so SQL Server undoes a failed one rather than
+leaving it half applied, and the lock is there so that two app copies starting together cannot
+both apply the same one. (The rollback of a failed *transaction* is covered by tests; a
+deliberately broken migration and two simultaneous starts were not tried.) Keep the backup you took before upgrading regardless.
 
 ## Building without Docker
 
@@ -359,11 +391,18 @@ build:
 ```sh
 cargo install topcoat-cli --version 0.12.0 --locked
 topcoat asset bundle --release        # builds target/release/todo-app and target/release/assets
-DATABASE_URL=sqlite:/var/lib/todo/app.db HOST=0.0.0.0 ./target/release/todo-app
+DATABASE_URL='sqlserver://user:password@db.example.com:1433/todoapp' HOST=0.0.0.0 ./target/release/todo-app
 ```
+
+This needs a SQL Server the app can reach (your own, or a container as in the compose file). On
+Linux the binary uses the system's OpenSSL (`libssl3`) for the database connection; the Docker
+image installs it.
 
 Running a plain `cargo build` binary without the bundle panics at startup with
 `no asset bundle at ...`.
+
+For an on-premises Windows Server (a service, HTTPS, backups), see
+[DEPLOYMENT-WINDOWS.md](DEPLOYMENT-WINDOWS.md).
 
 ## Go-live checklist
 
@@ -373,7 +412,10 @@ Running a plain `cargo build` binary without the bundle panics at startup with
       not reachable except through the proxy.
 - [ ] A backup is scheduled, copied off the machine, and a restore has been tried. You know how
       long you keep old backups, since deleted accounts live on in them.
-- [ ] `.env` is not committed (it is in `.gitignore`); the app has no secrets of its own.
+- [ ] `.env` is not committed (it is in `.gitignore`). It holds the SQL Server `sa` password
+      (`MSSQL_SA_PASSWORD`), which you chose yourself and is not the placeholder from
+      `.env.example`; the `db` container's port is not published (the compose file does not).
+- [ ] SQL Server's edition suits your license (`MSSQL_PID`; the compose default is Express).
 - [ ] `REGISTRATION` is set the way you intend (the compose file defaults to `closed`), and you
       have created your own account with `create-user`.
 - [ ] If you turned on email: `send-test-email` succeeded, a real reset email arrived (not in
@@ -395,4 +437,5 @@ Running a plain `cargo build` binary without the bundle panics at startup with
 | Page loads but is unstyled or buttons do nothing | Check the browser console for Content-Security-Policy messages. To experiment safely, set `CSP_REPORT_ONLY=1`. |
 | `docker compose up` shows no mapping for port 80 or 443 | Another process already holds that host port. On Windows even built-in services can (`netstat -ano`). Set `HTTP_PORT` and `HTTPS_PORT` in `.env`. Note the HTTP-to-HTTPS redirect omits a non-standard HTTPS port. |
 | The build fails downloading something | The build needs network access for the Tailwind CLI and the font files. |
-| Container is `unhealthy` | `docker compose logs app`; usually the database file is not writable by user 10001. |
+| App container is `unhealthy` or exits | `docker compose logs app`; usually it cannot reach or sign in to SQL Server (`cannot open the database: ...`): check `docker compose ps` that `db` is healthy, and that `MSSQL_SA_PASSWORD` in `.env` is the one the database was first created with (changing it later does not change an existing database's password). |
+| `db` never becomes healthy | `docker compose logs db`. SQL Server needs about 2 GB of memory and refuses a weak or missing `MSSQL_SA_PASSWORD`. |

@@ -1,15 +1,48 @@
-# The app behind a Caddy reverse proxy that terminates HTTPS.
+# The app, a SQL Server database, and a Caddy reverse proxy that terminates HTTPS.
 #
+#   cp .env.example .env              (then set MSSQL_SA_PASSWORD, and SITE_ADDRESS)
 #   docker compose up -d --build
 #   open https://localhost            (or set SITE_ADDRESS to your domain)
 #
 # See docs/DEPLOYMENT.md. Settings can be put in a `.env` file next to this one.
 
 services:
+  # SQL Server. Its port is not published: only the app can reach it, on the private network.
+  # (docker-compose.dev.yml is the variant that publishes a port, for local development.)
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      # Express is free and allowed in production (10 GB database limit). The Developer
+      # edition is for development and testing only. Set MSSQL_PID in .env to use a license.
+      MSSQL_PID: "${MSSQL_PID:-Express}"
+      # Required; SQL Server refuses weak ones (8+ characters from three of: upper case,
+      # lower case, digits, symbols). Use letters and digits only, or the app's DATABASE_URL
+      # below needs the password percent-encoded.
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}"
+    volumes:
+      - db-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" -b -o /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   app:
     build: .
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
+      # The app creates the `todoapp` database on first start and applies its migrations.
+      # trust_server_certificate: SQL Server's own certificate is self-signed; the traffic
+      # is still encrypted, and it never leaves the private compose network.
+      DATABASE_URL: "sqlserver://sa:${MSSQL_SA_PASSWORD}@db:1433/todoapp?trust_server_certificate=true"
       # Exactly one reverse proxy (Caddy) sits in front, and the app's port is not
       # published, so every request passes through it. The app then reads the client's
       # address from the proxy's X-Forwarded-For header, which the login rate limiter uses.
@@ -28,9 +61,7 @@ services:
       # in .env (docs/DEPLOYMENT.md, "Forgotten passwords"). Empty means email is off.
       SMTP_URL: "${SMTP_URL:-}"
       MAIL_FROM: "${MAIL_FROM:-}"
-    volumes:
-      - app-data:/data
-    # The app writes only to its database volume.
+    # The app writes nothing to its own disk: its data is in the database.
     read_only: true
     tmpfs:
       - /tmp
@@ -57,6 +88,6 @@ services:
       - caddy-config:/config
 
 volumes:
-  app-data:
+  db-data:
   caddy-data:
   caddy-config:

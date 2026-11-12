@@ -3,26 +3,20 @@
 //! Like todos, every function takes the acting user's id and treats lists that belong to
 //! someone else as if they did not exist.
 
+use mssql_tiberius_bridge::Row;
 use topcoat::{Result, context::Cx};
 
-use super::todo::Todo;
-use crate::db::db;
+use crate::db::{DbError, RowExt, db, id_param};
 
 /// The longest list name, in characters.
 pub const MAX_NAME_LEN: usize = 80;
 /// The most lists one user may have.
 pub const MAX_LISTS: usize = 50;
 
-/// A named group of todos.
-#[derive(Debug, toasty::Model)]
+/// A named group of todos (a row of `dbo.lists`).
+#[derive(Debug, Clone)]
 pub struct List {
-    #[key]
-    #[auto]
     pub id: u64,
-
-    /// The owner.
-    #[index]
-    pub user_id: u64,
 
     pub name: String,
 }
@@ -89,19 +83,36 @@ fn name_taken(lists: &[List], name: &str, except: Option<u64>) -> bool {
 }
 
 impl List {
+    fn from_row(row: &Row) -> Result<Self, DbError> {
+        Ok(Self {
+            id: row.id("id")?,
+            name: row.req("name")?,
+        })
+    }
+
     /// The user's lists, oldest first.
     pub async fn list(cx: &Cx, user_id: u64) -> Result<Vec<List>> {
-        let lists = List::filter_by_user_id(user_id)
-            .order_by(List::fields().id().asc())
-            .exec(&mut db(cx))
+        let rows = db(cx)
+            .query(
+                "SELECT id, name FROM dbo.lists WHERE user_id = @P1 ORDER BY id",
+                &[&id_param(user_id)],
+            )
             .await?;
-        Ok(lists)
+        Ok(rows
+            .iter()
+            .map(Self::from_row)
+            .collect::<Result<_, DbError>>()?)
     }
 
     /// The user's list with this id, or `None` if it doesn't exist or isn't theirs.
     pub async fn find_owned(cx: &Cx, user_id: u64, id: u64) -> Result<Option<List>> {
-        let list = List::filter_by_id(id).first().exec(&mut db(cx)).await?;
-        Ok(list.filter(|list| list.user_id == user_id))
+        let row = db(cx)
+            .query_one(
+                "SELECT id, name FROM dbo.lists WHERE id = @P1 AND user_id = @P2",
+                &[&id_param(id), &id_param(user_id)],
+            )
+            .await?;
+        Ok(row.as_ref().map(Self::from_row).transpose()?)
     }
 
     /// Creates a list.
@@ -120,12 +131,16 @@ impl List {
         if name_taken(&existing, &name, None) {
             return Ok(Err(ListError::Duplicate));
         }
-        let list = toasty::create!(List {
-            user_id,
-            name: name.as_str(),
-        })
-        .exec(&mut db(cx))
-        .await?;
+        let rows = db(cx)
+            .query(
+                "INSERT INTO dbo.lists (user_id, name)                  OUTPUT INSERTED.id, INSERTED.name                  VALUES (@P1, @P2)",
+                &[&id_param(user_id), &name.as_str()],
+            )
+            .await?;
+        let list = rows
+            .first()
+            .map(Self::from_row)
+            .unwrap_or_else(|| Err(DbError::Column("id".to_owned())))?;
         Ok(Ok(list))
     }
 
@@ -136,9 +151,9 @@ impl List {
         id: u64,
         name: &str,
     ) -> Result<std::result::Result<(), ListError>> {
-        let Some(mut list) = List::find_owned(cx, user_id, id).await? else {
+        if List::find_owned(cx, user_id, id).await?.is_none() {
             return Ok(Err(ListError::NotFound));
-        };
+        }
         let Some(name) = clean_name(name) else {
             return Ok(Err(ListError::Name));
         };
@@ -146,7 +161,12 @@ impl List {
         if name_taken(&existing, &name, Some(id)) {
             return Ok(Err(ListError::Duplicate));
         }
-        list.update().name(name.as_str()).exec(&mut db(cx)).await?;
+        db(cx)
+            .execute(
+                "UPDATE dbo.lists SET name = @P1 WHERE id = @P2 AND user_id = @P3",
+                &[&name.as_str(), &id_param(id), &id_param(user_id)],
+            )
+            .await?;
         Ok(Ok(()))
     }
 
@@ -156,16 +176,19 @@ impl List {
         if List::find_owned(cx, user_id, id).await?.is_none() {
             return Ok(false);
         }
-        let mut db = db(cx);
-        for mut todo in Todo::list(cx, user_id).await? {
-            if todo.list_id == Some(id) {
-                todo.update()
-                    .list_id(Option::<u64>::None)
-                    .exec(&mut db)
-                    .await?;
-            }
-        }
-        List::filter_by_id(id).delete().exec(&mut db).await?;
+        // One transaction, so a failure cannot leave todos pointing at a deleted list.
+        let mut tx = db(cx).begin().await?;
+        tx.execute(
+            "UPDATE dbo.todos SET list_id = NULL WHERE list_id = @P1 AND user_id = @P2",
+            &[&id_param(id), &id_param(user_id)],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM dbo.lists WHERE id = @P1 AND user_id = @P2",
+            &[&id_param(id), &id_param(user_id)],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(true)
     }
 }
@@ -173,7 +196,7 @@ impl List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::todo::TodoInput;
+    use crate::features::todo::{Todo, TodoInput};
 
     const ALICE: u64 = 1;
     const BOB: u64 = 2;

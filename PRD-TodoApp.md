@@ -6,6 +6,15 @@
 **Author:** TBD
 **Status:** Draft
 
+> **Revision, 2026-11-12: the database is now Microsoft SQL Server, not SQLite + Toasty.** The
+> data layer was rewritten as hand-written, parameterized T-SQL on Microsoft's `mssql-tds` driver
+> (the `mssql-rs` repository, via the `mssql-tiberius-bridge` pooling wrapper), with SQL Server
+> 2022 running in a Docker container. Toasty has no SQL Server driver, so it was dropped.
+> Wherever the text below says SQLite, Toasty, `data.db` or `toasty migration`, read "SQL Server",
+> the `db` module, the `todoapp` database and the numbered files in `migrations/`. The slice
+> history below is kept as it was written. See `todo-app/README.md` and
+> `todo-app/docs/DEPLOYMENT.md` for the current setup.
+
 > **Assumptions made (no interview round was held; please correct):** single developer / showcase POC; local-first deployment; SQLite for the database; lightweight email+password auth; no AI features. Topcoat details come from the [GitHub repo](https://github.com/tokio-rs/topcoat) (README, `docs/getting_started.md`, `examples/toasty-todo`), the [official announcement](https://tokio.rs/blog/2026-07-22-announcing-topcoat) and [docs.rs](https://docs.rs/topcoat). Topcoat is "early-stage and experimental. Expect breaking changes" — pin exact versions and re-verify API details (macro names, session/auth helpers) against the repo docs before building.
 >
 > **Verified from the repo:** `topcoat new --recommended` scaffolds an app with module routing, Tailwind, Topcoat UI, icons, fonts, and a todo example on **Toasty + SQLite** (`data.db`). Dev server: `topcoat dev`. Migrations: `cargo run -- toasty migration generate` / `apply`. The repo's toolchain is plain `stable`. Topcoat documents "bring-your-own-storage" session auth (login/logout, sliding expiration, token rotation).
@@ -249,12 +258,12 @@ Guidance if added: call the API server-side from a Topcoat action (key in env, n
 | Tooling | `topcoat-cli` 0.12 (`cargo install topcoat-cli`): `topcoat new`, `topcoat dev` (required to run: it builds the asset bundle; plain `cargo run` panics), `topcoat fmt`, `topcoat ui` | Scaffold, hot-reload dev server, macro formatting, copy-in UI components |
 | Web framework / UI | **Topcoat** + `topcoat-ui` (Tailwind) | Required; server-rendered, no WASM, reactivity via `signal` / `$(...)` / `#[shard]` |
 | Server runtime | Tokio (via Topcoat) | Async foundation |
-| Database | **SQLite** (POC); Postgres as post-MVP option | Zero-setup clone-and-run; same relational model |
-| Data access | **Toasty** async ORM (Topcoat's companion; SQLite confirmed by the `--recommended` scaffold) | First-class path in Topcoat; roadmap includes deeper form/record integration. Fallback: `sqlx` |
-| Migrations | Toasty CLI: `cargo run -- toasty migration generate` / `apply` | Versioned schema, already part of the scaffold |
-| Auth | Topcoat's bring-your-own-storage session auth, with sessions stored in SQLite via Toasty; `argon2` crate for password hashing | Reuses framework cookie/rotation/expiry handling instead of hand-rolling it; shows `require_auth(cx)` pattern |
+| Database | **Microsoft SQL Server 2022** in a Docker container (revised 2026-11-12; originally SQLite) | Requested; a real server database, run locally with one `docker compose` command |
+| Data access | **`mssql-tds`** (Microsoft's `mssql-rs` driver) via `mssql-tiberius-bridge` for pooling and parameter binding; hand-written T-SQL (revised; originally the Toasty ORM, which has no SQL Server driver) | Microsoft's own driver; every value is a bound parameter |
+| Migrations | Numbered T-SQL files in `migrations/`, embedded in the binary and applied at startup in one transaction (revised; originally the Toasty CLI) | Versioned schema, nothing to ship besides the executable |
+| Auth | Topcoat's bring-your-own-storage session auth, with sessions stored in SQL Server; `argon2` crate for password hashing | Reuses framework cookie/rotation/expiry handling instead of hand-rolling it; shows `require_auth(cx)` pattern |
 | Config / logging | `dotenvy`/env vars, `tracing` | Standard Rust practice |
-| Testing | `cargo test`, integration tests against in-memory SQLite, Playwright for 2–3 e2e smoke flows | Confidence without heavy infra |
+| Testing | `cargo test`, integration tests against a real SQL Server (a throwaway database per test), Playwright for 2–3 e2e smoke flows | Confidence without heavy infra |
 | Hosting | Local for the POC; Docker image + Fly.io/Railway (or a VPS) as stretch | Free/cheap, single binary |
 
 ### Alternative Stacks to Consider

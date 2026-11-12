@@ -3,26 +3,21 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mssql_tiberius_bridge::Row;
 use topcoat::{Result, context::Cx};
 
 use super::list::List;
-use crate::db::db;
+use crate::db::{DbError, RowExt, db, id_param};
 
 /// The longest title a todo may have, in characters.
 pub const MAX_TITLE_LEN: usize = 200;
 /// The longest notes a todo may have, in characters.
 pub const MAX_NOTES_LEN: usize = 2000;
 
-/// A todo item.
-#[derive(Debug, toasty::Model)]
+/// A todo item (a row of `dbo.todos`).
+#[derive(Debug, Clone)]
 pub struct Todo {
-    #[key]
-    #[auto]
     pub id: u64,
-
-    /// The owner.
-    #[index]
-    pub user_id: u64,
 
     pub title: String,
 
@@ -555,20 +550,42 @@ impl Todo {
         self.due_on.as_deref().and_then(Date::parse)
     }
 
+    fn from_row(row: &Row) -> Result<Self, DbError> {
+        Ok(Self {
+            id: row.id("id")?,
+            title: row.req("title")?,
+            done: row.req("done")?,
+            notes: row.opt("notes")?,
+            priority: row.req("priority")?,
+            due_on: row.opt("due_on")?,
+            list_id: row.opt_id("list_id")?,
+        })
+    }
+
     /// Returns the user's todos, oldest first.
     pub async fn list(cx: &Cx, user_id: u64) -> Result<Vec<Todo>> {
-        let todos = Todo::filter_by_user_id(user_id)
-            .order_by(Todo::fields().id().asc())
-            .exec(&mut db(cx))
+        let rows = db(cx)
+            .query(
+                "SELECT id, title, done, notes, priority, due_on, list_id                  FROM dbo.todos WHERE user_id = @P1 ORDER BY id",
+                &[&id_param(user_id)],
+            )
             .await?;
-        Ok(todos)
+        Ok(rows
+            .iter()
+            .map(Self::from_row)
+            .collect::<Result<_, DbError>>()?)
     }
 
     /// Returns the user's todo with this id, or `None` if it doesn't exist or belongs to
     /// someone else.
     pub async fn find_owned(cx: &Cx, user_id: u64, id: u64) -> Result<Option<Todo>> {
-        let todo = Todo::filter_by_id(id).first().exec(&mut db(cx)).await?;
-        Ok(todo.filter(|todo| todo.user_id == user_id))
+        let row = db(cx)
+            .query_one(
+                "SELECT id, title, done, notes, priority, due_on, list_id                  FROM dbo.todos WHERE id = @P1 AND user_id = @P2",
+                &[&id_param(id), &id_param(user_id)],
+            )
+            .await?;
+        Ok(row.as_ref().map(Self::from_row).transpose()?)
     }
 
     /// Whether the user may put a todo in `list_id`: the Inbox, or a list they own.
@@ -585,18 +602,19 @@ impl Todo {
         if !Todo::may_use_list(cx, user_id, input.list_id).await? {
             return Ok(false);
         }
-        let due_on = input.due.map(Date::to_iso);
-        toasty::create!(Todo {
-            user_id,
-            title: input.title.as_str(),
-            done: false,
-            notes: input.notes.clone(),
-            priority: input.priority.as_str(),
-            due_on,
-            list_id: input.list_id,
-        })
-        .exec(&mut db(cx))
-        .await?;
+        db(cx)
+            .execute(
+                "INSERT INTO dbo.todos (user_id, title, done, notes, priority, due_on, list_id)                  VALUES (@P1, @P2, 0, @P3, @P4, @P5, @P6)",
+                &[
+                    &id_param(user_id),
+                    &input.title.as_str(),
+                    &input.notes,
+                    &input.priority.as_str(),
+                    &input.due.map(Date::to_iso),
+                    &input.list_id.map(id_param),
+                ],
+            )
+            .await?;
         Ok(true)
     }
 
@@ -604,19 +622,25 @@ impl Todo {
     /// nothing, if the todo doesn't exist or belongs to someone else, or if the chosen
     /// list doesn't exist or belongs to someone else.
     pub async fn save(cx: &Cx, user_id: u64, id: u64, input: &TodoInput) -> Result<bool> {
-        let Some(mut todo) = Todo::find_owned(cx, user_id, id).await? else {
+        if Todo::find_owned(cx, user_id, id).await?.is_none() {
             return Ok(false);
-        };
+        }
         if !Todo::may_use_list(cx, user_id, input.list_id).await? {
             return Ok(false);
         }
-        todo.update()
-            .list_id(input.list_id)
-            .title(input.title.as_str())
-            .notes(input.notes.clone())
-            .priority(input.priority.as_str())
-            .due_on(input.due.map(Date::to_iso))
-            .exec(&mut db(cx))
+        db(cx)
+            .execute(
+                "UPDATE dbo.todos                  SET list_id = @P1, title = @P2, notes = @P3, priority = @P4, due_on = @P5                  WHERE id = @P6 AND user_id = @P7",
+                &[
+                    &input.list_id.map(id_param),
+                    &input.title.as_str(),
+                    &input.notes,
+                    &input.priority.as_str(),
+                    &input.due.map(Date::to_iso),
+                    &id_param(id),
+                    &id_param(user_id),
+                ],
+            )
             .await?;
         Ok(true)
     }
@@ -624,19 +648,26 @@ impl Todo {
     /// Marks the user's todo as done, or as not done if it already is. Does nothing if
     /// the todo doesn't exist or belongs to someone else.
     pub async fn toggle(cx: &Cx, user_id: u64, id: u64) -> Result<()> {
-        let Some(mut todo) = Todo::find_owned(cx, user_id, id).await? else {
-            return Ok(());
-        };
-        let done = !todo.done;
-        todo.update().done(done).exec(&mut db(cx)).await?;
+        // Flipped by the database itself, so two quick clicks cannot both read the old value
+        // and both write the same new one.
+        db(cx)
+            .execute(
+                "UPDATE dbo.todos SET done = CASE WHEN done = 1 THEN 0 ELSE 1 END \
+                 WHERE id = @P1 AND user_id = @P2",
+                &[&id_param(id), &id_param(user_id)],
+            )
+            .await?;
         Ok(())
     }
 
     /// Removes the user's todo. Does nothing if it doesn't exist or belongs to someone else.
     pub async fn remove(cx: &Cx, user_id: u64, id: u64) -> Result<()> {
-        if Todo::find_owned(cx, user_id, id).await?.is_some() {
-            Todo::filter_by_id(id).delete().exec(&mut db(cx)).await?;
-        }
+        db(cx)
+            .execute(
+                "DELETE FROM dbo.todos WHERE id = @P1 AND user_id = @P2",
+                &[&id_param(id), &id_param(user_id)],
+            )
+            .await?;
         Ok(())
     }
 }
@@ -1126,7 +1157,6 @@ mod tests {
     fn sample(id: u64, title: &str, notes: Option<&str>, done: bool) -> Todo {
         Todo {
             id,
-            user_id: 1,
             title: title.to_owned(),
             done,
             notes: notes.map(str::to_owned),

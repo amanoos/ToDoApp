@@ -2,13 +2,8 @@
 
 use topcoat::{Result, context::Cx};
 
-use super::{
-    list::List,
-    reset::PasswordReset,
-    todo::Todo,
-    user::{self, PasswordError, SessionRecord, User, normalize_email},
-};
-use crate::db::db;
+use super::user::{self, PasswordError, User, normalize_email};
+use crate::db::{Db, RowExt, db, id_param};
 
 /// Why a deletion was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,19 +60,25 @@ pub struct Purged {
 }
 
 /// What [`purge_user`] would remove for this user, without removing anything.
-pub async fn owned_by(db: &mut toasty::Db, user_id: u64) -> Result<Purged> {
+pub async fn owned_by(db: &Db, user_id: u64) -> Result<Purged> {
+    let rows = db
+        .query(
+            "SELECT                 (SELECT COUNT(*) FROM dbo.users WHERE id = @P1) AS accounts,                 (SELECT COUNT(*) FROM dbo.todos WHERE user_id = @P1) AS todos,                 (SELECT COUNT(*) FROM dbo.lists WHERE user_id = @P1) AS lists,                 (SELECT COUNT(*) FROM dbo.session_records WHERE user_id = @P1) AS sessions",
+            &[&id_param(user_id)],
+        )
+        .await?;
+    let row = rows
+        .first()
+        .ok_or_else(|| crate::db::DbError::Column("accounts".to_owned()))?;
+    let count = |column: &str| -> Result<usize> {
+        let value: i32 = row.req(column)?;
+        Ok(usize::try_from(value).unwrap_or(0))
+    };
     Ok(Purged {
-        account: User::filter_by_id(user_id)
-            .first()
-            .exec(&mut *db)
-            .await?
-            .is_some(),
-        todos: Todo::filter_by_user_id(user_id).exec(&mut *db).await?.len(),
-        lists: List::filter_by_user_id(user_id).exec(&mut *db).await?.len(),
-        sessions: SessionRecord::filter_by_user_id(user_id)
-            .exec(&mut *db)
-            .await?
-            .len(),
+        account: count("accounts")? > 0,
+        todos: count("todos")?,
+        lists: count("lists")?,
+        sessions: count("sessions")?,
     })
 }
 
@@ -85,49 +86,43 @@ pub async fn owned_by(db: &mut toasty::Db, user_id: u64) -> Result<Purged> {
 /// in one transaction, so it either happens completely or not at all (a failure part-way
 /// rolls everything back instead of leaving orphaned data). Deleting a user that does not
 /// exist removes nothing and is not an error.
-pub async fn purge_user(db: &mut toasty::Db, user_id: u64) -> Result<Purged> {
-    let mut tx = db.transaction().await?;
+pub async fn purge_user(db: &Db, user_id: u64) -> Result<Purged> {
+    let id = id_param(user_id);
+    let mut tx = db.begin().await?;
 
-    let sessions = SessionRecord::filter_by_user_id(user_id)
-        .exec(&mut tx)
-        .await?
-        .len();
-    SessionRecord::filter_by_user_id(user_id)
-        .delete()
-        .exec(&mut tx)
+    // Each DELETE reports how many rows it removed, which is what the summary says.
+    let sessions = tx
+        .execute(
+            "DELETE FROM dbo.session_records WHERE user_id = @P1",
+            &[&id],
+        )
         .await?;
-
-    let todos = Todo::filter_by_user_id(user_id).exec(&mut tx).await?.len();
-    Todo::filter_by_user_id(user_id)
-        .delete()
-        .exec(&mut tx)
+    let todos = tx
+        .execute("DELETE FROM dbo.todos WHERE user_id = @P1", &[&id])
         .await?;
-
-    let lists = List::filter_by_user_id(user_id).exec(&mut tx).await?.len();
-    List::filter_by_user_id(user_id)
-        .delete()
-        .exec(&mut tx)
+    let lists = tx
+        .execute("DELETE FROM dbo.lists WHERE user_id = @P1", &[&id])
         .await?;
 
     // A pending reset link must not outlive the account it was for.
-    PasswordReset::filter_by_user_id(user_id)
-        .delete()
-        .exec(&mut tx)
-        .await?;
+    tx.execute(
+        "DELETE FROM dbo.password_resets WHERE user_id = @P1",
+        &[&id],
+    )
+    .await?;
 
-    let account = User::filter_by_id(user_id)
-        .first()
-        .exec(&mut tx)
+    let account = tx
+        .execute("DELETE FROM dbo.users WHERE id = @P1", &[&id])
         .await?
-        .is_some();
-    User::filter_by_id(user_id).delete().exec(&mut tx).await?;
+        > 0;
 
     tx.commit().await?;
+    let count = |rows: u64| usize::try_from(rows).unwrap_or(usize::MAX);
     Ok(Purged {
         account,
-        todos,
-        lists,
-        sessions,
+        todos: count(todos),
+        lists: count(lists),
+        sessions: count(sessions),
     })
 }
 
@@ -144,11 +139,7 @@ pub async fn delete_account(
     password: &str,
     confirm_email: &str,
 ) -> Result<std::result::Result<Purged, DeleteError>> {
-    let Some(account) = User::filter_by_id(user_id)
-        .first()
-        .exec(&mut db(cx))
-        .await?
-    else {
+    let Some(account) = User::find_by_id(&db(cx), user_id).await? else {
         return Ok(Err(DeleteError::WrongPassword));
     };
     if normalize_email(confirm_email).as_deref() != Some(account.email.as_str()) {
@@ -161,24 +152,24 @@ pub async fn delete_account(
         Err(_) => return Ok(Err(DeleteError::WrongPassword)),
     }
 
-    let mut handle = db(cx);
-    Ok(Ok(purge_user(&mut handle, user_id).await?))
+    Ok(Ok(purge_user(&db(cx), user_id).await?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::{
-        todo::TodoInput,
-        user::{create_account, verify_and_set},
+        list::List,
+        todo::{Todo, TodoInput},
+        user::{SessionRecord, create_account, verify_and_set},
     };
 
     const PASSWORD: &str = "a fine long password";
     const NEW_PASSWORD: &str = "some brand new password 1";
 
     async fn account(cx: &Cx, email: &str) -> User {
-        let mut handle = db(cx);
-        create_account(&mut handle, email, PASSWORD)
+        let handle = db(cx);
+        create_account(&handle, email, PASSWORD)
             .await
             .unwrap()
             .expect("account created")
@@ -193,40 +184,22 @@ mod tests {
             let input = TodoInput::parse(title, "", "medium", "").unwrap();
             assert!(Todo::add(cx, user.id, &input).await.unwrap());
         }
-        toasty::create!(SessionRecord {
-            token_hash: vec![user.id as u8; 32],
-            user_id: user.id,
-            expires_at: 9_999_999_999i64,
-        })
-        .exec(&mut db(cx))
-        .await
-        .unwrap();
+        SessionRecord::create(&db(cx), &[user.id as u8; 32], user.id, 9_999_999_999i64)
+            .await
+            .unwrap();
     }
 
     /// (todos, lists, sessions, accounts) belonging to the user.
     async fn owned(cx: &Cx, user_id: u64) -> (usize, usize, usize, usize) {
-        let mut handle = db(cx);
+        let handle = db(cx);
         (
-            Todo::filter_by_user_id(user_id)
-                .exec(&mut handle)
+            Todo::list(cx, user_id).await.unwrap().len(),
+            List::list(cx, user_id).await.unwrap().len(),
+            SessionRecord::for_user(&handle, user_id)
                 .await
                 .unwrap()
                 .len(),
-            List::filter_by_user_id(user_id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
-            SessionRecord::filter_by_user_id(user_id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
-            User::filter_by_id(user_id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
+            usize::from(User::find_by_id(&handle, user_id).await.unwrap().is_some()),
         )
     }
 
@@ -250,7 +223,7 @@ mod tests {
         give_data(&cx, &bob).await;
         assert_eq!(owned(&cx, alice.id).await, (2, 2, 1, 1));
 
-        let purged = purge_user(&mut db(&cx), alice.id).await.unwrap();
+        let purged = purge_user(&db(&cx), alice.id).await.unwrap();
         assert_eq!(
             purged,
             Purged {
@@ -274,8 +247,8 @@ mod tests {
         let alice = account(&cx, "alice@example.com").await;
         give_data(&cx, &alice).await;
 
-        let mut handle = db(&cx);
-        let preview = owned_by(&mut handle, alice.id).await.unwrap();
+        let handle = db(&cx);
+        let preview = owned_by(&handle, alice.id).await.unwrap();
         assert_eq!(
             preview,
             Purged {
@@ -291,12 +264,12 @@ mod tests {
             "nothing was removed"
         );
         assert_eq!(
-            purge_user(&mut handle, alice.id).await.unwrap(),
+            purge_user(&handle, alice.id).await.unwrap(),
             preview,
             "the preview matches what the purge then removes"
         );
         assert_eq!(
-            owned_by(&mut handle, alice.id).await.unwrap(),
+            owned_by(&handle, alice.id).await.unwrap(),
             Purged::default()
         );
     }
@@ -306,24 +279,24 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let alice = account(&cx, "alice@example.com").await;
         let bob = account(&cx, "bob@example.com").await;
-        let alices_link = crate::features::reset::issue(&mut db(&cx), alice.id, 1_000)
+        let alices_link = crate::features::reset::issue(&db(&cx), alice.id, 1_000)
             .await
             .unwrap();
-        let bobs_link = crate::features::reset::issue(&mut db(&cx), bob.id, 1_000)
+        let bobs_link = crate::features::reset::issue(&db(&cx), bob.id, 1_000)
             .await
             .unwrap();
 
-        purge_user(&mut db(&cx), alice.id).await.unwrap();
-        let mut handle = db(&cx);
+        purge_user(&db(&cx), alice.id).await.unwrap();
+        let handle = db(&cx);
         assert!(
-            crate::features::reset::find_valid(&mut handle, &alices_link, 1_000)
+            crate::features::reset::find_valid(&handle, &alices_link, 1_000)
                 .await
                 .unwrap()
                 .is_none(),
             "her link died with her account"
         );
         assert!(
-            crate::features::reset::find_valid(&mut handle, &bobs_link, 1_000)
+            crate::features::reset::find_valid(&handle, &bobs_link, 1_000)
                 .await
                 .unwrap()
                 .is_some(),
@@ -336,13 +309,13 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let bob = account(&cx, "bob@example.com").await;
         give_data(&cx, &bob).await;
-        let purged = purge_user(&mut db(&cx), 987_654).await.unwrap();
+        let purged = purge_user(&db(&cx), 987_654).await.unwrap();
         assert_eq!(purged, Purged::default());
         assert_eq!(owned(&cx, bob.id).await, (2, 2, 1, 1));
         // Purging twice is harmless too.
-        purge_user(&mut db(&cx), bob.id).await.unwrap();
+        purge_user(&db(&cx), bob.id).await.unwrap();
         assert_eq!(
-            purge_user(&mut db(&cx), bob.id).await.unwrap(),
+            purge_user(&db(&cx), bob.id).await.unwrap(),
             Purged::default()
         );
     }
@@ -523,42 +496,12 @@ mod tests {
         assert_eq!(owned(&cx, old.id).await, (0, 0, 0, 0));
     }
 
-    /// A database built from the real migrations except that the `lists` table is never
-    /// created, so a purge fails at the lists step, *after* it has already deleted the
-    /// user's sessions and todos. That is the half-done state a transaction must undo.
-    async fn database_without_lists() -> toasty::Db {
-        use toasty::migration::{MigrationFile, MigrationSet};
-
-        let sql = [
-            include_str!("../../toasty/migrations/0000_migration.sql"),
-            include_str!("../../toasty/migrations/0001_migration.sql"),
-            include_str!("../../toasty/migrations/0002_migration.sql"),
-            include_str!("../../toasty/migrations/0003_migration.sql"),
-            include_str!("../../toasty/migrations/0004_migration.sql"),
-        ];
-        // Keep only 0003's first statement (the `todos.list_id` column), dropping `lists`.
-        let without_lists: &'static str = Box::leak(
-            sql[3]
-                .split("-- #[toasty::breakpoint]")
-                .next()
-                .unwrap()
-                .to_owned()
-                .into_boxed_str(),
-        );
-        let files: &'static [MigrationFile] = Box::leak(Box::new([
-            MigrationFile::new(1, "0000_migration.sql", sql[0]),
-            MigrationFile::new(2, "0001_migration.sql", sql[1]),
-            MigrationFile::new(3, "0002_migration.sql", sql[2]),
-            MigrationFile::new(4, "0003_migration.sql", without_lists),
-            MigrationFile::new(5, "0004_migration.sql", sql[4]),
-        ]));
-
-        let db = toasty::Db::builder()
-            .models(toasty::models!(crate::*))
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        MigrationSet::new(files).apply(&db).await.unwrap();
+    /// A database built from the real migrations except that the `lists` table is dropped,
+    /// so a purge fails at the lists step, *after* it has already deleted the user's sessions
+    /// and todos. That is the half-done state a transaction must undo.
+    async fn database_without_lists() -> Db {
+        let db = crate::db::testing::migrated().await;
+        db.execute("DROP TABLE dbo.lists", &[]).await.unwrap();
         db
     }
 
@@ -572,46 +515,27 @@ mod tests {
         let alice = account(&cx, "alice@example.com").await;
         let input = TodoInput::parse("keep me", "", "medium", "").unwrap();
         assert!(Todo::add(&cx, alice.id, &input).await.unwrap());
-        toasty::create!(SessionRecord {
-            token_hash: vec![7u8; 32],
-            user_id: alice.id,
-            expires_at: 9_999_999_999i64,
-        })
-        .exec(&mut db.clone())
-        .await
-        .unwrap();
+        SessionRecord::create(&db, &[7u8; 32], alice.id, 9_999_999_999i64)
+            .await
+            .unwrap();
 
         // The purge deletes sessions, then todos, then fails on the missing `lists` table.
-        let outcome = purge_user(&mut db.clone(), alice.id).await;
+        let outcome = purge_user(&db, alice.id).await;
         assert!(outcome.is_err(), "the purge must fail here");
 
         // Nothing was removed, including what had already been deleted inside the transaction.
-        let mut handle = db.clone();
         assert_eq!(
-            Todo::filter_by_user_id(alice.id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
+            Todo::list(&cx, alice.id).await.unwrap().len(),
             1,
             "the todo is back"
         );
         assert_eq!(
-            SessionRecord::filter_by_user_id(alice.id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
+            SessionRecord::for_user(&db, alice.id).await.unwrap().len(),
             1,
             "the session is back"
         );
-        assert_eq!(
-            User::filter_by_id(alice.id)
-                .exec(&mut handle)
-                .await
-                .unwrap()
-                .len(),
-            1,
+        assert!(
+            User::find_by_id(&db, alice.id).await.unwrap().is_some(),
             "the account is still there"
         );
     }

@@ -1,0 +1,35 @@
+# Just the database, for local development with `topcoat dev` and `cargo test`:
+#
+#   docker compose -f docker-compose.dev.yml up -d --wait
+#   topcoat dev
+#
+# SQL Server listens on 127.0.0.1:1433 only. The sa password below is for this throwaway
+# local container; the app's default DATABASE_URL (src/config.rs) uses the same one. For
+# anything shared or deployed, use docker-compose.yml, which requires you to choose a password.
+#
+# Set MSSQL_SA_PASSWORD (in the shell or a .env file) to use a different one, and then set
+# DATABASE_URL to match.
+
+services:
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-ToDoApp-Dev-Passw0rd}"
+    ports:
+      - "127.0.0.1:${MSSQL_PORT:-1433}:1433"
+    volumes:
+      - dev-db-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" -b -o /dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  dev-db-data:

@@ -12,6 +12,7 @@ use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
+use mssql_tiberius_bridge::Row;
 use topcoat::{
     Result,
     context::{Cx, context},
@@ -21,7 +22,7 @@ use topcoat::{
 
 use super::throttle::{Limit, Throttle};
 use crate::config::Registration;
-use crate::db::db;
+use crate::db::{Db, DbError, RowExt, db, id_param};
 
 /// How long a session lasts without activity. Active sessions are extended; see
 /// [`refresh_session`].
@@ -65,36 +66,175 @@ pub const MAX_PASSWORD_LEN: usize = 128;
 /// Longest email address, as in RFC 5321.
 pub const MAX_EMAIL_LEN: usize = 320;
 
-/// A person with an account.
-#[derive(Debug, toasty::Model)]
+/// A person with an account (a row of `dbo.users`).
+#[derive(Debug, Clone)]
 pub struct User {
-    #[key]
-    #[auto]
     pub id: u64,
 
-    /// Lower-cased and trimmed.
-    #[unique]
+    /// Lower-cased and trimmed. Unique.
     pub email: String,
 
     /// An Argon2id hash in PHC string format, which includes its own salt.
     pub password_hash: String,
 }
 
-/// A logged-in session: which user a token hash belongs to, and until when.
-#[derive(Debug, toasty::Model)]
+impl User {
+    fn from_row(row: &Row) -> Result<Self, DbError> {
+        Ok(Self {
+            id: row.id("id")?,
+            email: row.req("email")?,
+            password_hash: row.req("password_hash")?,
+        })
+    }
+
+    /// The account with this id.
+    pub async fn find_by_id(db: &Db, id: u64) -> Result<Option<Self>, DbError> {
+        db.query_one(
+            "SELECT id, email, password_hash FROM dbo.users WHERE id = @P1",
+            &[&id_param(id)],
+        )
+        .await?
+        .as_ref()
+        .map(Self::from_row)
+        .transpose()
+    }
+
+    /// The account with this email, which must already be [normalised](normalize_email).
+    pub async fn find_by_email(db: &Db, email: &str) -> Result<Option<Self>, DbError> {
+        db.query_one(
+            "SELECT id, email, password_hash FROM dbo.users WHERE email = @P1",
+            &[&email],
+        )
+        .await?
+        .as_ref()
+        .map(Self::from_row)
+        .transpose()
+    }
+
+    /// The oldest account, if there is one.
+    pub async fn first(db: &Db) -> Result<Option<Self>, DbError> {
+        db.query_one(
+            "SELECT TOP 1 id, email, password_hash FROM dbo.users ORDER BY id",
+            &[],
+        )
+        .await?
+        .as_ref()
+        .map(Self::from_row)
+        .transpose()
+    }
+
+    /// Adds an account and returns it. Fails if the email is taken.
+    async fn create(db: &Db, email: &str, password_hash: &str) -> Result<Self, DbError> {
+        let rows = db
+            .query(
+                "INSERT INTO dbo.users (email, password_hash) \
+                 OUTPUT INSERTED.id, INSERTED.email, INSERTED.password_hash \
+                 VALUES (@P1, @P2)",
+                &[&email, &password_hash],
+            )
+            .await?;
+        rows.first()
+            .map(Self::from_row)
+            .unwrap_or_else(|| Err(DbError::Column("id".to_owned())))
+    }
+
+    /// Stores a new password hash for the account.
+    pub async fn set_password_hash(db: &Db, id: u64, password_hash: &str) -> Result<(), DbError> {
+        db.execute(
+            "UPDATE dbo.users SET password_hash = @P1 WHERE id = @P2",
+            &[&password_hash, &id_param(id)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Every account, oldest first.
+    #[cfg(test)]
+    pub async fn all(db: &Db) -> Result<Vec<Self>, DbError> {
+        db.query(
+            "SELECT id, email, password_hash FROM dbo.users ORDER BY id",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(Self::from_row)
+        .collect()
+    }
+}
+
+/// A logged-in session: which user a token hash belongs to, and until when (a row of
+/// `dbo.session_records`).
+#[derive(Debug, Clone)]
 pub struct SessionRecord {
-    #[key]
-    #[auto]
     pub id: u64,
 
-    #[unique]
-    pub token_hash: Vec<u8>,
-
-    #[index]
     pub user_id: u64,
 
     /// Seconds since the Unix epoch.
     pub expires_at: i64,
+}
+
+impl SessionRecord {
+    fn from_row(row: &Row) -> Result<Self, DbError> {
+        Ok(Self {
+            id: row.id("id")?,
+            user_id: row.id("user_id")?,
+            expires_at: row.req("expires_at")?,
+        })
+    }
+
+    /// Records a session.
+    pub async fn create(
+        db: &Db,
+        token_hash: &[u8],
+        user_id: u64,
+        expires_at: i64,
+    ) -> Result<(), DbError> {
+        db.execute(
+            "INSERT INTO dbo.session_records (token_hash, user_id, expires_at) \
+             VALUES (@P1, @P2, @P3)",
+            &[&token_hash, &id_param(user_id), &expires_at],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The session with this token hash.
+    pub async fn find_by_token_hash(db: &Db, token_hash: &[u8]) -> Result<Option<Self>, DbError> {
+        db.query_one(
+            "SELECT id, user_id, expires_at FROM dbo.session_records \
+             WHERE token_hash = @P1",
+            &[&token_hash],
+        )
+        .await?
+        .as_ref()
+        .map(Self::from_row)
+        .transpose()
+    }
+
+    /// Every session of one user.
+    #[cfg(test)]
+    pub async fn for_user(db: &Db, user_id: u64) -> Result<Vec<Self>, DbError> {
+        db.query(
+            "SELECT id, user_id, expires_at FROM dbo.session_records \
+             WHERE user_id = @P1 ORDER BY id",
+            &[&id_param(user_id)],
+        )
+        .await?
+        .iter()
+        .map(Self::from_row)
+        .collect()
+    }
+
+    /// Removes the session with this token hash, if there is one.
+    pub async fn delete_by_token_hash(db: &Db, token_hash: &[u8]) -> Result<(), DbError> {
+        db.execute(
+            "DELETE FROM dbo.session_records WHERE token_hash = @P1",
+            &[&token_hash],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 /// Why registration or login was refused. Shown to the person, so keep it generic where
@@ -235,22 +375,22 @@ pub async fn registration_open(cx: &Cx) -> Result<bool> {
         Registration::Open => Ok(true),
         Registration::Closed => Ok(false),
         // Open only until there is a first account.
-        Registration::FirstUser => Ok(User::all().first().exec(&mut db(cx)).await?.is_none()),
+        Registration::FirstUser => Ok(User::first(&db(cx)).await?.is_none()),
     }
 }
 
 /// In `first-user` mode, settles a race between simultaneous sign-ups: the account with the
 /// lowest id is the first and stays; any other is deleted. Returns whether `user` stayed.
-async fn first_user_wins(db: &mut toasty::Db, user: &User) -> Result<bool> {
-    let first = User::all()
-        .order_by(User::fields().id().asc())
-        .first()
-        .exec(db)
-        .await?;
+async fn first_user_wins(db: &Db, user: &User) -> Result<bool> {
+    let first = User::first(db).await?;
     if first.is_some_and(|first| first.id == user.id) {
         return Ok(true);
     }
-    User::filter_by_id(user.id).delete().exec(db).await?;
+    db.execute(
+        "DELETE FROM dbo.users WHERE id = @P1",
+        &[&id_param(user.id)],
+    )
+    .await?;
     Ok(false)
 }
 
@@ -274,13 +414,13 @@ pub async fn register(
         return Ok(Err(AuthError::Closed));
     }
 
-    let mut db = db(cx);
-    let user = match create_account(&mut db, email, password).await? {
+    let db = db(cx);
+    let user = match create_account(&db, email, password).await? {
         Ok(user) => user,
         Err(error) => return Ok(Err(error)),
     };
     if *context::<Registration>(cx) == Registration::FirstUser
-        && !first_user_wins(&mut db, &user).await?
+        && !first_user_wins(&db, &user).await?
     {
         return Ok(Err(AuthError::Closed));
     }
@@ -294,7 +434,7 @@ pub async fn register(
 /// acceptable password, an email nobody uses) and nothing else. Used by sign-up, and by
 /// `todo-app create-user` to make accounts on a site with sign-ups closed.
 pub async fn create_account(
-    db: &mut toasty::Db,
+    db: &Db,
     email: &str,
     password: &str,
 ) -> Result<std::result::Result<User, AuthError>> {
@@ -305,12 +445,7 @@ pub async fn create_account(
         return Ok(Err(AuthError::WeakPassword));
     }
 
-    if User::filter_by_email(&email)
-        .first()
-        .exec(&mut *db)
-        .await?
-        .is_some()
-    {
+    if User::find_by_email(db, &email).await?.is_some() {
         return Ok(Err(AuthError::EmailTaken));
     }
 
@@ -322,21 +457,10 @@ pub async fn create_account(
         .map_err(|error| other_error(format!("hashing the password failed: {error}")))?;
 
     // The unique index on `email` still decides a race between two registrations.
-    let created = toasty::create!(User {
-        email: email.as_str(),
-        password_hash: password_hash.as_str(),
-    })
-    .exec(&mut *db)
-    .await;
+    let created = User::create(db, &email, &password_hash).await;
     let user = match created {
         Ok(user) => user,
-        Err(_)
-            if User::filter_by_email(&email)
-                .first()
-                .exec(&mut *db)
-                .await?
-                .is_some() =>
-        {
+        Err(_) if User::find_by_email(db, &email).await?.is_some() => {
             return Ok(Err(AuthError::EmailTaken));
         }
         Err(error) => return Err(error.into()),
@@ -406,8 +530,7 @@ async fn check_credentials(
         return Ok(Err(AuthError::BadCredentials));
     }
 
-    let mut db = db(cx);
-    let user = User::filter_by_email(&email).first().exec(&mut db).await?;
+    let user = User::find_by_email(&db(cx), &email).await?;
 
     let stored = user.as_ref().map_or_else(
         || dummy_hash().to_owned(),
@@ -430,12 +553,12 @@ async fn check_credentials(
 /// Issues a fresh session token to the client and records which user it belongs to.
 async fn start_session(cx: &Cx, user: &User) -> Result<()> {
     let session: Session = session::start(cx).await?;
-    toasty::create!(SessionRecord {
-        token_hash: session.token_hash.to_vec(),
-        user_id: user.id,
-        expires_at: unix_seconds(session.expires_at),
-    })
-    .exec(&mut db(cx))
+    SessionRecord::create(
+        &db(cx),
+        session.token_hash.as_slice(),
+        user.id,
+        unix_seconds(session.expires_at),
+    )
     .await?;
     Ok(())
 }
@@ -443,10 +566,7 @@ async fn start_session(cx: &Cx, user: &User) -> Result<()> {
 /// Ends the current session, on the client and in the database.
 pub async fn log_out(cx: &Cx) -> Result<()> {
     if let Some(hash) = session::stop(cx).await? {
-        SessionRecord::filter_by_token_hash(hash.to_vec())
-            .delete()
-            .exec(&mut db(cx))
-            .await?;
+        SessionRecord::delete_by_token_hash(&db(cx), hash.as_slice()).await?;
     }
     Ok(())
 }
@@ -460,50 +580,42 @@ pub async fn current_user(cx: &Cx) -> Result<Option<User>> {
 }
 
 async fn user_for_token(cx: &Cx, hash: &TokenHash) -> Result<Option<User>> {
-    user_for_hash(
-        &mut db(cx),
-        hash.as_slice(),
-        unix_seconds(SystemTime::now()),
-    )
-    .await
+    user_for_hash(&db(cx), hash.as_slice(), unix_seconds(SystemTime::now())).await
 }
 
 /// The user a session token hash belongs to, if the session exists and has not expired
 /// by `now` (Unix seconds).
-async fn user_for_hash(db: &mut toasty::Db, hash: &[u8], now: i64) -> Result<Option<User>> {
-    let Some(record) = SessionRecord::filter_by_token_hash(hash.to_vec())
-        .first()
-        .exec(db)
-        .await?
-    else {
+async fn user_for_hash(db: &Db, hash: &[u8], now: i64) -> Result<Option<User>> {
+    let Some(record) = SessionRecord::find_by_token_hash(db, hash).await? else {
         return Ok(None);
     };
     if record.expires_at <= now {
         return Ok(None);
     }
-    Ok(User::filter_by_id(record.user_id).first().exec(db).await?)
+    Ok(User::find_by_id(db, record.user_id).await?)
 }
 
 /// Deletes every session that has expired by `now` (Unix seconds). Expired sessions
 /// already can't log anyone in; this only keeps the table from growing forever.
-pub async fn purge_expired_sessions(db: &mut toasty::Db, now: i64) -> Result<()> {
-    SessionRecord::filter(SessionRecord::fields().expires_at().le(now))
-        .delete()
-        .exec(db)
-        .await?;
+pub async fn purge_expired_sessions(db: &Db, now: i64) -> Result<()> {
+    db.execute(
+        "DELETE FROM dbo.session_records WHERE expires_at <= @P1",
+        &[&now],
+    )
+    .await?;
     Ok(())
 }
 
 /// Runs [`purge_expired_sessions`], and clears expired password-reset links, now and then
 /// once an hour, forever. Spawn it once at startup. A failed sweep is reported and retried
 /// at the next interval.
-pub async fn sweep_expired_sessions(mut db: toasty::Db) {
+pub async fn sweep_expired_sessions(db: Db) {
     loop {
         let now = unix_seconds(SystemTime::now());
-        if let Err(error) = purge_expired_sessions(&mut db, now).await {
+        if let Err(error) = purge_expired_sessions(&db, now).await {
             eprintln!("could not delete expired sessions: {error:#}");
         }
-        if let Err(error) = super::reset::purge_expired(&mut db, now).await {
+        if let Err(error) = super::reset::purge_expired(&db, now).await {
             eprintln!("could not delete expired reset links: {error:#}");
         }
         tokio::time::sleep(Duration::from_secs(60 * 60)).await;
@@ -525,12 +637,8 @@ pub async fn refresh_session(cx: &Cx) -> Result<()> {
     let Some(hash) = session::token_hash(cx).await? else {
         return Ok(());
     };
-    let mut db = db(cx);
-    let Some(mut record) = SessionRecord::filter_by_token_hash(hash.to_vec())
-        .first()
-        .exec(&mut db)
-        .await?
-    else {
+    let db = db(cx);
+    let Some(record) = SessionRecord::find_by_token_hash(&db, hash.as_slice()).await? else {
         return Ok(());
     };
     let now = unix_seconds(SystemTime::now());
@@ -538,11 +646,11 @@ pub async fn refresh_session(cx: &Cx) -> Result<()> {
         return Ok(());
     }
     if let Some(session) = session::refresh(cx).await? {
-        record
-            .update()
-            .expires_at(unix_seconds(session.expires_at))
-            .exec(&mut db)
-            .await?;
+        db.execute(
+            "UPDATE dbo.session_records SET expires_at = @P1 WHERE id = @P2",
+            &[&unix_seconds(session.expires_at), &id_param(record.id)],
+        )
+        .await?;
     }
     Ok(())
 }
@@ -637,10 +745,7 @@ pub async fn verify_current_password(
         return Ok(Err(PasswordError::Throttled));
     }
 
-    let user = User::filter_by_id(user_id)
-        .first()
-        .exec(&mut db(cx))
-        .await?;
+    let user = User::find_by_id(&db(cx), user_id).await?;
     let matches = match (&user, current.chars().count() <= MAX_PASSWORD_LEN) {
         (Some(user), true) => {
             let (current, stored) = (current.to_owned(), user.password_hash.clone());
@@ -675,10 +780,9 @@ pub async fn verify_and_set(
         return Ok(Err(PasswordError::WeakPassword));
     }
 
-    let mut user = match verify_current_password(cx, user_id, current).await? {
-        Ok(user) => user,
-        Err(error) => return Ok(Err(error)),
-    };
+    if let Err(error) = verify_current_password(cx, user_id, current).await? {
+        return Ok(Err(error));
+    }
 
     // Only said once the person has proved they know the current password.
     if new == current {
@@ -690,35 +794,31 @@ pub async fn verify_and_set(
         .await
         .map_err(|error| other_error(format!("password hashing task failed: {error}")))?
         .map_err(|error| other_error(format!("hashing the password failed: {error}")))?;
-    user.update()
-        .password_hash(new_hash.as_str())
-        .exec(&mut db(cx))
-        .await?;
+    User::set_password_hash(&db(cx), user_id, &new_hash).await?;
 
     context::<Throttle>(cx).clear(&password_user_key(user_id));
     Ok(Ok(()))
 }
 
 /// Deletes every session of the user, then records `keep` (a token hash and its expiry) as
-/// the only one left, if given.
-async fn replace_sessions(
-    db: &mut toasty::Db,
-    user_id: u64,
-    keep: Option<(Vec<u8>, i64)>,
-) -> Result<()> {
-    SessionRecord::filter_by_user_id(user_id)
-        .delete()
-        .exec(db)
-        .await?;
+/// the only one left, if given. Both steps happen in one transaction, so the person is never
+/// left with no session because the second step failed.
+async fn replace_sessions(db: &Db, user_id: u64, keep: Option<(Vec<u8>, i64)>) -> Result<()> {
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "DELETE FROM dbo.session_records WHERE user_id = @P1",
+        &[&id_param(user_id)],
+    )
+    .await?;
     if let Some((token_hash, expires_at)) = keep {
-        toasty::create!(SessionRecord {
-            token_hash,
-            user_id,
-            expires_at,
-        })
-        .exec(db)
+        tx.execute(
+            "INSERT INTO dbo.session_records (token_hash, user_id, expires_at) \
+             VALUES (@P1, @P2, @P3)",
+            &[&token_hash, &id_param(user_id), &expires_at],
+        )
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -742,7 +842,7 @@ pub async fn change_password(
             unix_seconds(rotation.session.expires_at),
         )
     });
-    replace_sessions(&mut db(cx), user_id, keep).await?;
+    replace_sessions(&db(cx), user_id, keep).await?;
     Ok(Ok(()))
 }
 
@@ -817,13 +917,9 @@ mod tests {
 
     async fn create_user(cx: &Cx, email: &str, password: &str) -> User {
         let password_hash = hash_password(password).expect("hashes");
-        toasty::create!(User {
-            email,
-            password_hash: password_hash.as_str(),
-        })
-        .exec(&mut db(cx))
-        .await
-        .expect("user created")
+        User::create(&db(cx), email, &password_hash)
+            .await
+            .expect("user created")
     }
 
     async fn failed_login(cx: &Cx, email: &str) -> Option<AuthError> {
@@ -937,7 +1033,7 @@ mod tests {
     // --- Who may sign up ---
 
     async fn user_count(cx: &Cx) -> usize {
-        User::all().exec(&mut db(cx)).await.unwrap().len()
+        User::all(&db(cx)).await.unwrap().len()
     }
 
     async fn register_outcome(cx: &Cx, email: &str, password: &str) -> Option<AuthError> {
@@ -995,8 +1091,8 @@ mod tests {
         let cx = crate::db::test_cx().await.with(Registration::FirstUser);
         assert!(registration_open(&cx).await.unwrap(), "no accounts yet");
 
-        let mut handle = db(&cx);
-        create_account(&mut handle, "owner@example.com", OLD)
+        let handle = db(&cx);
+        create_account(&handle, "owner@example.com", OLD)
             .await
             .unwrap()
             .unwrap();
@@ -1014,25 +1110,25 @@ mod tests {
     #[tokio::test]
     async fn when_two_first_sign_ups_race_only_the_earliest_survives() {
         let cx = crate::db::test_cx().await.with(Registration::FirstUser);
-        let mut handle = db(&cx);
+        let handle = db(&cx);
         // Both passed the "no accounts yet" check before either was saved.
-        let first = create_account(&mut handle, "one@example.com", OLD)
+        let first = create_account(&handle, "one@example.com", OLD)
             .await
             .unwrap()
             .unwrap();
-        let second = create_account(&mut handle, "two@example.com", OLD)
+        let second = create_account(&handle, "two@example.com", OLD)
             .await
             .unwrap()
             .unwrap();
         assert!(first.id < second.id);
 
         assert!(
-            !first_user_wins(&mut handle, &second).await.unwrap(),
+            !first_user_wins(&handle, &second).await.unwrap(),
             "the later one loses"
         );
         assert_eq!(user_count(&cx).await, 1, "and is removed");
         assert!(
-            first_user_wins(&mut handle, &first).await.unwrap(),
+            first_user_wins(&handle, &first).await.unwrap(),
             "the earlier one stays"
         );
         assert_eq!(user_count(&cx).await, 1);
@@ -1041,19 +1137,19 @@ mod tests {
     #[tokio::test]
     async fn create_account_always_applies_the_basic_checks_whatever_the_mode() {
         let cx = crate::db::test_cx().await.with(Registration::Closed);
-        let mut handle = db(&cx);
+        let handle = db(&cx);
         let outcome = |r: Result<std::result::Result<User, AuthError>>| r.unwrap().err();
 
         assert_eq!(
-            outcome(create_account(&mut handle, "nonsense", OLD).await),
+            outcome(create_account(&handle, "nonsense", OLD).await),
             Some(AuthError::InvalidEmail)
         );
         assert_eq!(
-            outcome(create_account(&mut handle, "a@example.com", "short").await),
+            outcome(create_account(&handle, "a@example.com", "short").await),
             Some(AuthError::WeakPassword)
         );
 
-        let user = create_account(&mut handle, " Admin@Example.COM ", OLD)
+        let user = create_account(&handle, " Admin@Example.COM ", OLD)
             .await
             .unwrap()
             .unwrap();
@@ -1061,7 +1157,7 @@ mod tests {
         assert!(user.password_hash.starts_with("$argon2id$"));
         assert!(verify_password(OLD, &user.password_hash));
         assert_eq!(
-            outcome(create_account(&mut handle, "ADMIN@example.com", OLD).await),
+            outcome(create_account(&handle, "ADMIN@example.com", OLD).await),
             Some(AuthError::EmailTaken)
         );
         assert_eq!(user_count(&cx).await, 1);
@@ -1073,9 +1169,7 @@ mod tests {
     const NEW: &str = "brand new password 9";
 
     async fn stored_hash(cx: &Cx, user_id: u64) -> String {
-        User::filter_by_id(user_id)
-            .first()
-            .exec(&mut db(cx))
+        User::find_by_id(&db(cx), user_id)
             .await
             .unwrap()
             .expect("user exists")
@@ -1262,7 +1356,7 @@ mod tests {
         add_session(&cx, [2; 32], alice.id, 9_999_999_999).await; // a thief's session
         add_session(&cx, [3; 32], bob.id, 9_999_999_999).await;
 
-        replace_sessions(&mut db(&cx), alice.id, Some((vec![9; 32], 9_999_999_999)))
+        replace_sessions(&db(&cx), alice.id, Some((vec![9; 32], 9_999_999_999)))
             .await
             .unwrap();
         assert!(
@@ -1283,23 +1377,11 @@ mod tests {
         );
 
         // The new token finds her; the old ones find nobody.
-        let mut handle = db(&cx);
-        assert!(
-            user_for_hash(&mut handle, &[9; 32], 0)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            user_for_hash(&mut handle, &[2; 32], 0)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let handle = db(&cx);
+        assert!(user_for_hash(&handle, &[9; 32], 0).await.unwrap().is_some());
+        assert!(user_for_hash(&handle, &[2; 32], 0).await.unwrap().is_none());
 
-        replace_sessions(&mut db(&cx), alice.id, None)
-            .await
-            .unwrap();
+        replace_sessions(&db(&cx), alice.id, None).await.unwrap();
         assert!(
             !session_exists(&cx, [9; 32]).await,
             "with nothing to keep, all are dropped"
@@ -1325,20 +1407,13 @@ mod tests {
     // --- Sessions: lookup, expiry, cleanup, refresh ---
 
     async fn add_session(cx: &Cx, token_hash: [u8; 32], user_id: u64, expires_at: i64) {
-        toasty::create!(SessionRecord {
-            token_hash: token_hash.to_vec(),
-            user_id,
-            expires_at,
-        })
-        .exec(&mut db(cx))
-        .await
-        .expect("session recorded");
+        SessionRecord::create(&db(cx), &token_hash, user_id, expires_at)
+            .await
+            .expect("session recorded");
     }
 
     async fn session_exists(cx: &Cx, token_hash: [u8; 32]) -> bool {
-        SessionRecord::filter_by_token_hash(token_hash.to_vec())
-            .first()
-            .exec(&mut db(cx))
+        SessionRecord::find_by_token_hash(&db(cx), &token_hash)
             .await
             .expect("queried")
             .is_some()
@@ -1349,19 +1424,19 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let user = create_user(&cx, "alice@example.com", "correct horse battery").await;
         add_session(&cx, [7; 32], user.id, 1_000).await;
-        let mut handle = db(&cx);
+        let handle = db(&cx);
 
-        let found = user_for_hash(&mut handle, &[7; 32], 999).await.unwrap();
+        let found = user_for_hash(&handle, &[7; 32], 999).await.unwrap();
         assert_eq!(found.map(|u| u.email), Some("alice@example.com".to_owned()));
         assert!(
-            user_for_hash(&mut handle, &[7; 32], 1_000)
+            user_for_hash(&handle, &[7; 32], 1_000)
                 .await
                 .unwrap()
                 .is_none(),
             "expired at the expiry second"
         );
         assert!(
-            user_for_hash(&mut handle, &[7; 32], 5_000)
+            user_for_hash(&handle, &[7; 32], 5_000)
                 .await
                 .unwrap()
                 .is_none()
@@ -1373,15 +1448,10 @@ mod tests {
         let cx = crate::db::test_cx().await;
         let user = create_user(&cx, "alice@example.com", "correct horse battery").await;
         add_session(&cx, [7; 32], user.id, 1_000).await;
-        let mut handle = db(&cx);
+        let handle = db(&cx);
 
-        assert!(
-            user_for_hash(&mut handle, &[8; 32], 0)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(user_for_hash(&mut handle, &[], 0).await.unwrap().is_none());
+        assert!(user_for_hash(&handle, &[8; 32], 0).await.unwrap().is_none());
+        assert!(user_for_hash(&handle, &[], 0).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1389,7 +1459,7 @@ mod tests {
         let cx = crate::db::test_cx().await;
         add_session(&cx, [9; 32], 12_345, 1_000).await;
         assert!(
-            user_for_hash(&mut db(&cx), &[9; 32], 0)
+            user_for_hash(&db(&cx), &[9; 32], 0)
                 .await
                 .unwrap()
                 .is_none()
@@ -1404,7 +1474,7 @@ mod tests {
         add_session(&cx, [2; 32], user.id, 1_000).await; // expires exactly now
         add_session(&cx, [3; 32], user.id, 5_000).await; // still live
 
-        purge_expired_sessions(&mut db(&cx), 1_000).await.unwrap();
+        purge_expired_sessions(&db(&cx), 1_000).await.unwrap();
         assert!(!session_exists(&cx, [1; 32]).await);
         assert!(!session_exists(&cx, [2; 32]).await);
         assert!(
@@ -1413,7 +1483,7 @@ mod tests {
         );
 
         // Running it again changes nothing.
-        purge_expired_sessions(&mut db(&cx), 1_000).await.unwrap();
+        purge_expired_sessions(&db(&cx), 1_000).await.unwrap();
         assert!(session_exists(&cx, [3; 32]).await);
     }
 

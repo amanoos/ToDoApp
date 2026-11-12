@@ -34,7 +34,7 @@ pub async fn page(cx: &Cx) -> Result<impl View> {
     // 64 hex characters cannot carry markup, and a dead link gets no form at all.
     let token = match query.token.as_deref().and_then(reset::clean_token) {
         Some(token)
-            if reset::find_valid(&mut db(cx), &token, reset::now())
+            if reset::find_valid(&db(cx), &token, reset::now())
                 .await?
                 .is_some() =>
         {

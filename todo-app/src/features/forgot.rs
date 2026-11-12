@@ -30,7 +30,10 @@ use super::{
     throttle::{Limit, Throttle},
     user::{self, User, normalize_email},
 };
-use crate::{config::EmailConfig, db::db};
+use crate::{
+    config::EmailConfig,
+    db::{Db, db},
+};
 
 /// Requests from one network: 10 per 15 minutes.
 const REQUESTS_PER_NETWORK: Limit = Limit {
@@ -189,9 +192,9 @@ pub fn request(cx: &Cx, raw_email: &str) -> Admission {
     if admission == Admission::Send
         && let Some(email) = email
     {
-        let mut handle = db(cx);
+        let handle = db(cx);
         tokio::spawn(async move {
-            if let Err(error) = deliver(&mut handle, &sender, &email, reset::now()).await {
+            if let Err(error) = deliver(&handle, &sender, &email, reset::now()).await {
                 // Neither the address nor the link is logged.
                 eprintln!("could not email a password reset link: {error}");
             }
@@ -202,13 +205,8 @@ pub fn request(cx: &Cx, raw_email: &str) -> Admission {
 
 /// Emails a fresh reset link to the account with this (already normalized) address, if there
 /// is one. Returns whether a message was sent.
-pub async fn deliver(
-    db: &mut toasty::Db,
-    sender: &EmailSender,
-    email: &str,
-    now: i64,
-) -> Result<bool> {
-    let Some(user) = User::filter_by_email(email).first().exec(&mut *db).await? else {
+pub async fn deliver(db: &Db, sender: &EmailSender, email: &str, now: i64) -> Result<bool> {
+    let Some(user) = User::find_by_email(db, email).await? else {
         return Ok(false);
     };
     let token = reset::issue(db, user.id, now).await?;
@@ -241,7 +239,7 @@ mod tests {
     }
 
     async fn account(cx: &Cx, email: &str) -> User {
-        create_account(&mut db(cx), email, OLD)
+        create_account(&db(cx), email, OLD)
             .await
             .unwrap()
             .expect("account created")
@@ -262,7 +260,7 @@ mod tests {
         let (sender, transport) = sender();
 
         assert!(
-            deliver(&mut db(&cx), &sender, "ada@example.com", NOW)
+            deliver(&db(&cx), &sender, "ada@example.com", NOW)
                 .await
                 .unwrap()
         );
@@ -278,7 +276,7 @@ mod tests {
 
         // The link in the message really resets the password, exactly once.
         let token = token_in(mail);
-        reset::redeem(&mut db(&cx), &token, NEW, NOW + 60)
+        reset::redeem(&db(&cx), &token, NEW, NOW + 60)
             .await
             .unwrap()
             .expect("the emailed link works");
@@ -289,7 +287,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(
-            reset::redeem(&mut db(&cx), &token, NEW, NOW + 61)
+            reset::redeem(&db(&cx), &token, NEW, NOW + 61)
                 .await
                 .unwrap(),
             Err(ResetError::InvalidLink)
@@ -303,19 +301,12 @@ mod tests {
         let (sender, transport) = sender();
 
         assert!(
-            !deliver(&mut db(&cx), &sender, "nobody@example.com", NOW)
+            !deliver(&db(&cx), &sender, "nobody@example.com", NOW)
                 .await
                 .unwrap()
         );
         assert!(transport.sent().is_empty());
-        assert_eq!(
-            reset::PasswordReset::all()
-                .exec(&mut db(&cx))
-                .await
-                .unwrap()
-                .len(),
-            0
-        );
+        assert_eq!(reset::PasswordReset::all(&db(&cx)).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -324,10 +315,10 @@ mod tests {
         account(&cx, "ada@example.com").await;
         let (sender, transport) = sender();
 
-        deliver(&mut db(&cx), &sender, "ada@example.com", NOW)
+        deliver(&db(&cx), &sender, "ada@example.com", NOW)
             .await
             .unwrap();
-        deliver(&mut db(&cx), &sender, "ada@example.com", NOW + 10)
+        deliver(&db(&cx), &sender, "ada@example.com", NOW + 10)
             .await
             .unwrap();
 
@@ -335,13 +326,13 @@ mod tests {
         let (first, second) = (token_in(&sent[0]), token_in(&sent[1]));
         assert_ne!(first, second);
         assert!(
-            reset::find_valid(&mut db(&cx), &first, NOW + 20)
+            reset::find_valid(&db(&cx), &first, NOW + 20)
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
-            reset::find_valid(&mut db(&cx), &second, NOW + 20)
+            reset::find_valid(&db(&cx), &second, NOW + 20)
                 .await
                 .unwrap()
                 .is_some()
@@ -358,7 +349,7 @@ mod tests {
             "noreply@example.com".parse().unwrap(),
             "https://mine.example.org".to_owned(),
         );
-        deliver(&mut db(&cx), &sender, "ada@example.com", NOW)
+        deliver(&db(&cx), &sender, "ada@example.com", NOW)
             .await
             .unwrap();
         let text = transport.sent()[0].text().unwrap().to_owned();
